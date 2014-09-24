@@ -220,7 +220,7 @@ static int create_process(struct server *s, int dfd, char *cmdline,
 }
 
 #define SHSTR  "sh -c '"
-#define CMDSTR "CMD.EXE /Q /C "
+#define CMDSTR "CMD.EXE /C "
 int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newenv,
 		struct tup_entry *dtent, int full_deps)
 {
@@ -242,6 +242,10 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
 	int have_shell = strncmp(cmd, "sh ", 3) == 0
 		|| strncmp(cmd, "bash ", 5) == 0
 		|| strncmp(cmd, "cmd ", 4) == 0;
+
+	//TODO: Why was this added?
+	// Causes more problems than it fixes
+//	have_shell = 1;
 
 	int need_sh = 0;
 
