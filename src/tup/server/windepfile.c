@@ -29,9 +29,14 @@
 #include "compat/win32/dirpath.h"
 #include "compat/win32/open_notify.h"
 #include "compat/dir_mutex.h"
+#include "tup/db.h"
+#include "tup/parser.h"
+#include "tup/fslurp.h"
+#include "tup/option.h"
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <tchar.h>
 
 #define TUP_TMP ".tup/tmp"
 
@@ -57,7 +62,7 @@ int server_post_exit(void)
 int server_init(enum server_mode mode)
 {
 	char *slash;
-	char mycwd[PATH_MAX];
+	char mycwd[MAX_PATH];
 	struct flist f = {0, 0, 0};
 	int cwdlen;
 
@@ -131,6 +136,9 @@ int server_init(enum server_mode mode)
 		return -1;
 	}
 
+	// Inject into self
+	tup_inject_init(NULL);
+
 	if(SetConsoleCtrlHandler(console_handler, TRUE) == 0) {
 		perror("SetConsoleCtrlHandler");
 		fprintf(stderr, "tup error: Unable to set the CTRL-C handler.\n");
@@ -141,8 +149,129 @@ int server_init(enum server_mode mode)
 	return 0;
 }
 
+typedef struct slist slist;
+
+struct slist {
+	char *name;
+	slist *next;
+};
+
+
+static void string_add(slist **list, const char *name)
+{
+	slist *ptr;
+	slist *item = calloc(sizeof(slist), 1);
+	if(name != NULL)
+		item->name = strdup(name);
+
+	if(*list != NULL) {
+		ptr = *list;
+		while (ptr->next != NULL) ptr = ptr->next;
+		ptr->next = item;
+	} else {
+		*list = item;
+	}
+}
+
 int server_quit(void)
 {
+	if(!server_inited)
+		return 0;
+
+	struct tup_entry *variantTent, *normalTent;
+	tupid_t srcTupid = DOT_DT;
+	struct tup_entry *srcTent = tup_entry_get(srcTupid);
+
+	// No need to do in-src builds
+	if(tup_entry_variant_null(srcTent) != NULL) {
+		if(srcTent->variant->enabled)
+			return 0;
+	}
+
+	int cnt = 0;
+	char *cwd = _getcwd(NULL, 0);
+	HANDLE hFind;
+	WIN32_FIND_DATA findData;
+
+	char searchString[PATH_MAX];
+	char pathName[PATH_MAX];
+	char *pathStr;
+	slist *dirs = NULL;
+	slist *tups = NULL, *cTups = NULL;
+	int linkExists;
+
+	// Start with cwd
+	string_add(&dirs, ".");
+
+	do {
+		// search this directory
+		sprintf(searchString, "%s\\%s\\*.*", cwd, dirs->name);
+
+		hFind = FindFirstFile(searchString, &findData);
+		if(hFind != INVALID_HANDLE_VALUE) {
+			do {
+				sprintf(pathName, "%s\\%s", dirs->name, findData.cFileName);
+				if(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY &&
+					findData.cFileName[0] != '.') {
+					string_add(&dirs, pathName);
+				} else if(strncmp(findData.cFileName, "Tupfile", 7) == 0) {
+					string_add(&tups, pathName);
+				}
+
+			} while (FindNextFile(hFind, &findData));
+		}
+	} while ((dirs = dirs->next) != NULL);
+
+	tup_db_open();
+	tup_db_begin();
+
+	// Look up variants
+	struct variant_head *variants = get_variant_list();
+	struct variant *var = variants->lh_first;
+
+	while (var != NULL) {
+
+		if(var->enabled) {
+			cTups = tups;
+
+			while (cTups != NULL) {
+				// First part should be the variant directory
+				variantTent = tup_entry_get(var->tent->parent->tnode.tupid);
+				normalTent = srcTent;
+				pathStr = strtok(strdup(cTups->name), "\\");
+
+				// Next we resolve in-source Tupfile and variant directory
+				while ((pathStr = strtok(NULL, "\\")) != NULL) {
+					tup_db_select_tent(normalTent->tnode.tupid, pathStr, &normalTent);
+
+					// Only after directory for variant
+					if(strncmp(pathStr, "Tupfile", 7) != 0) {
+						tup_db_select_tent(variantTent->tnode.tupid, pathStr, &variantTent);
+					}
+
+					if(normalTent == NULL || variantTent == NULL) {
+						break;
+					}
+				}
+
+				if(normalTent != NULL && variantTent != NULL) {
+					cnt++;
+					linkExists = 0;
+					tup_db_link_exists(normalTent->tnode.tupid, variantTent->tnode.tupid, TUP_LINK_NORMAL, &linkExists);
+					if(!linkExists)
+						tup_db_create_link(normalTent->tnode.tupid, variantTent->tnode.tupid, TUP_LINK_NORMAL);
+				}
+
+				cTups = cTups->next;
+			}
+		}
+		var = var->list.le_next;
+	}
+
+	tup_db_commit();
+
+	//fprintf(stderr, "Patched %d dependencies\n", cnt);
+
 	return 0;
 }
 
@@ -220,7 +349,8 @@ static int create_process(struct server *s, int dfd, char *cmdline,
 }
 
 #define SHSTR  "sh -c '"
-#define CMDSTR "CMD.EXE /Q /C "
+// /D disables potentially harmfull addons
+#define CMDSTR "CMD.EXE /D /Q /C "
 int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newenv,
 		struct tup_entry *dtent, int full_deps)
 {
@@ -239,9 +369,9 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
 	struct file_entry *fent;
 	struct file_entry *tmp;
 
-	int have_shell = strncmp(cmd, "sh ", 3) == 0
-		|| strncmp(cmd, "bash ", 5) == 0
-		|| strncmp(cmd, "cmd ", 4) == 0;
+	int have_shell = strncasecmp(cmd, "sh ", 3) == 0
+		|| strncasecmp(cmd, "bash ", 5) == 0
+		|| strncasecmp(cmd, "cmd ", 4) == 0;
 
 	int need_sh = 0;
 
@@ -289,6 +419,15 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
 	strcat(cmdline, cmd);
 	if(need_sh) {
 		strcat(cmdline, "'");
+	}
+
+	// Patch up directory slashes
+	char *slash = strchr(cmdline, '\\');
+	while (slash != NULL) {
+		// Make sure we don't mess up escape characters
+		if(slash[1] != '\0' && (isalnum(slash[1]) != 0 || slash[1] == '.'))
+			slash[0] = '/';
+		slash = strchr(slash + 1, '\\');
 	}
 
 	pthread_mutex_lock(&dir_mutex);
@@ -435,7 +574,162 @@ int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
 		      struct tupid_entries *env_root, char **rules)
 {
 	if(f || tupid || cmdline || env_root || rules) {/* unsupported */}
-	fprintf(stderr, "tup error: Run scripts are not yet supported on this platform.\n");
+
+	struct tup_entry *tent;
+	struct server s;
+	struct tup_env te;
+	int need_shell = 0, full_deps = 0, dfd;
+	CHAR cmdLine[128];
+	char *cr;
+	struct tup_entry *script_entry = NULL;
+
+	tent = tup_entry_get(tupid);
+
+	// Parse out name of script, without arguments and possibly './'
+	char *nameBuf = strdup(cmdline);
+	char *name = strchr(nameBuf, ' ');
+	if(name != NULL) {
+		name[0] = 0;
+	}
+
+	// If name contains slashes, we assume it is a local 
+	// script, and try to add a dependency. Otherwise
+	// it is a global script, and TUP can not track it.
+	if(strstr(nameBuf, "/") != NULL && (nameBuf[0] != '/' || strstr(nameBuf, ":") != NULL)) {
+
+		name = strtok(nameBuf, "/");
+
+		tupid_t targetTupid = tupid;
+		struct tup_entry *targetTent = tent;
+
+		do {
+
+			// Up a directory
+			if(strncmp(name, "..", 2) == 0) {
+				do {
+					// ../out of source tree
+					if(targetTent->parent == NULL)
+						break;
+
+					// Load parent...
+					targetTupid = targetTent->parent->tnode.tupid;
+					targetTent = tup_entry_get(targetTupid);
+
+					// Break out when we have a real name
+					name = strtok(NULL, "/");
+					if(strncmp(name, "..", 2) != 0)
+						break;
+
+				} while (name != NULL);
+			}
+			// Skip single dot
+			else if(strncmp(name, ".", 1) == 0) {
+				name = strtok(NULL, "/");
+			}
+
+			if(tup_entry_variant_null(targetTent) != NULL) {
+				// Variant
+				if(targetTent->variant->tent->parent->dt != 0) {
+					tup_db_select_tent(targetTent->variant->tent->parent->dt, name, &script_entry);
+				} else {
+					tup_db_select_tent(targetTupid, name, &script_entry);
+				}
+			}
+
+			if(script_entry != NULL) {
+				targetTupid = script_entry->tnode.tupid;
+				targetTent = tup_entry_get(targetTupid);
+			}
+
+		} while ((name = strtok(NULL, "/")) != NULL && script_entry != NULL);
+
+		// Failed.
+		if(script_entry == NULL) {
+			fprintf(f, "tup error: unable to locate run-script: '%s'\n", cmdline);
+			free(nameBuf);
+			return -1;
+		}
+
+		// Add dependency
+		struct tupfile *tf = (struct tupfile *) CONTAINING_RECORD(env_root, struct tupfile, env_root);
+		tupid_tree_add_dup(&tf->input_root, script_entry->tnode.tupid);
+	}
+
+	// On windows, we invoke 'sh -c' only when using shell scripts, rest is parsed through cmd,
+	// should work with all kinds of scripts as long as they have a registered type
+	if(strstr(cmdline, ".sh") != NULL)
+		need_shell = 1;
+
+	cmdLine[0] = 0;
+	if(need_shell)
+		strcat(cmdLine, SHSTR);
+	else
+		strcat(cmdLine, CMDSTR);
+
+	strcat(cmdLine, cmdline);
+	if(need_shell)
+		strcat(cmdLine, "'");
+
+	free(nameBuf);
+
+	if(tup_db_get_environ(env_root, NULL, &te) < 0)
+		return -1;
+
+	full_deps = tup_option_get_int("updater.full_deps");
+
+	s.id = tupid;
+	s.output_fd = -1;
+	s.error_fd = -1;
+	s.exited = 0;
+	s.exit_status = 0;
+	s.signalled = 0;
+	s.error_mutex = NULL;
+	init_file_info(&s.finfo, tup_entry_variant(tent)->variant_dir);
+
+	dfd = tup_entry_open(tent);
+
+	if(server_exec(&s, dfd, cmdLine, &te, tent, full_deps) != 0) {
+		fprintf(f, "tup-error: Unable to execute run-script: %s\n", cmdLine);
+		return -1;
+	}
+
+	environ_free(&te);
+
+	if(display_output(s.error_fd, 1, cmdline, 1, f) < 0)
+		return -1;
+	if(close(s.error_fd) < 0) {
+		perror("close(s.error_fd)");
+		return -1;
+	}
+
+	if(s.exited) {
+		if(s.exit_status == 0) {
+			struct buf b;
+			if(fslurp_null(s.output_fd, &b) < 0)
+				return -1;
+			if(close(s.output_fd) < 0) {
+				perror("close(s.output_fd)");
+				return -1;
+			}
+
+			// Remove all carriage return from output
+			cr = strchr(b.s, '\r');
+			while (cr != NULL) {
+				cr[0] = ' ';
+				cr = strchr(cr, '\r');
+			}
+			*rules = b.s;
+			return 0;
+		}
+		fprintf(f, "tup error: run-script exited with failure code: %i\n", s.exit_status);
+	} else {
+		if(s.signalled) {
+			fprintf(f, "tup error: run-script terminated with signal %i\n", s.exit_sig);
+		} else {
+			fprintf(f, "tup error: run-script terminated abnormally.\n");
+		}
+	}
+
 	return -1;
 }
 

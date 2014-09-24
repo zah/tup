@@ -1,4 +1,6 @@
 include_rules
 CFLAGS += -Wno-missing-prototypes
+CFLAGS += -Wno-unknown-pragmas
 CFLAGS += -DNDEBUG
 : foreach *.c |> !mingwcc |>
+: foreach *.c |> !mingwcc32 |>

@@ -26,12 +26,16 @@
 int unlinkat(int dirfd, const char *pathname, int flags)
 {
 	int rc;
+	char cwd[PATH_MAX];
+	_getcwd(cwd, PATH_MAX);
 
+	//fprintf(stderr, "FD: %d CWD: %s\n", dirfd, cwd);
 	dir_mutex_lock(dirfd);
 	if(flags == AT_REMOVEDIR)
 		rc = rmdir(pathname);
 	else
 		rc = unlink(pathname);
+	chdir(cwd);
 	dir_mutex_unlock();
 	return rc;
 }
