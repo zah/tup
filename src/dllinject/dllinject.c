@@ -2198,12 +2198,10 @@ int tup_inject_dll(
 
 	TCHAR buffer[1024];
 	if (GetModuleFileNameEx(lpProcessInformation->hProcess,0,buffer,1024)){
-		DEBUG_HOOK("Executable: %s\n", buffer);
+		DEBUG_HOOK("%s is WOW64: %i\n", buffer, bWow64);
 	}
 
-
 	// WOW64
-	DEBUG_HOOK("%s is WOW64: %i\n", GetCommandLineA(), bWow64);
 	if (bWow64) {
 		remote_thread32_t remote;
 
