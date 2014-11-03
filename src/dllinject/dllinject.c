@@ -33,6 +33,7 @@
 #ifndef STATUS_SUCCESS
 #include <ntstatus.h>
 #endif
+#include <winternl.h>
 #include <psapi.h>
 #include <stdio.h>
 #include <string.h>
@@ -329,7 +330,6 @@ typedef BOOL (WINAPI *CreateProcessWithTokenW_t)(
     __in        LPSTARTUPINFOW lpStartupInfo,
     __out       LPPROCESS_INFORMATION lpProcessInformation);
 
-typedef void *PIO_STATUS_BLOCK;
 typedef NTSTATUS (WINAPI *NtOpenFile_t)(
     __out  PHANDLE FileHandle,
     __in   ACCESS_MASK DesiredAccess,
@@ -350,6 +350,21 @@ typedef NTSTATUS (WINAPI *NtCreateFile_t)(
     __in      ULONG CreateOptions,
     __in      PVOID EaBuffer,
     __in      ULONG EaLength);
+
+typedef NTSTATUS (WINAPI *NtCreateUserProcess_t)(
+PHANDLE ProcessHandle,
+PHANDLE ThreadHandle,
+ACCESS_MASK ProcessDesiredAccess,
+ACCESS_MASK ThreadDesiredAccess,
+POBJECT_ATTRIBUTES ProcessObjectAttributes,
+POBJECT_ATTRIBUTES ThreadObjectAttributes,
+ULONG ProcessFlags,
+ULONG ThreadFlags,
+PRTL_USER_PROCESS_PARAMETERS ProcessParameters,
+ULONG_PTR CreateInfo,
+ULONG_PTR AttributeList
+);
+
 
 typedef int (*access_t)(const char *pathname, int mode);
 typedef FILE *(*fopen_t)(const char *path, const char *mode);
@@ -397,6 +412,7 @@ static CreateProcessWithLogonW_t	CreateProcessWithLogonW_orig;
 static CreateProcessWithTokenW_t	CreateProcessWithTokenW_orig;
 static NtCreateFile_t			NtCreateFile_orig;
 static NtOpenFile_t			NtOpenFile_orig;
+static NtCreateUserProcess_t		NtCreateUserProcess_orig;
 static access_t				_access_orig;
 static fopen_t				fopen_orig;
 static rename_t				rename_orig;
@@ -721,6 +737,53 @@ NTSTATUS WINAPI NtOpenFile_hook(
 out_free:
 		free(ansi);
 	}
+
+	return rc;
+}
+
+NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
+PHANDLE ThreadHandle,
+ACCESS_MASK ProcessDesiredAccess,
+ACCESS_MASK ThreadDesiredAccess,
+POBJECT_ATTRIBUTES ProcessObjectAttributes,
+POBJECT_ATTRIBUTES ThreadObjectAttributes,
+ULONG ProcessFlags,
+ULONG ThreadFlags,
+PRTL_USER_PROCESS_PARAMETERS ProcessParameters,
+ULONG_PTR CreateInfo,
+ULONG_PTR AttributeList)
+{
+
+	NTSTATUS rc = NtCreateUserProcess_orig(ProcessHandle,
+		ThreadHandle, ProcessDesiredAccess,
+		ThreadDesiredAccess,
+		ProcessObjectAttributes,
+		ThreadObjectAttributes,
+		ProcessFlags, ThreadFlags,
+		ProcessParameters,CreateInfo, AttributeList);
+
+        if (rc != STATUS_SUCCESS) {
+                return rc;
+        }
+
+        TCHAR buffer[1024];
+        if (GetModuleFileNameEx(*ProcessHandle,0,buffer,1024)){
+		char *exec = strrchr(buffer, '\\');
+		if (exec == NULL) return rc;
+
+		exec++;
+		if (strncasecmp(exec, "tup32detect.exe", 15) == 0 ||
+			strncasecmp(exec, "mspdbsrv.exe", 12) == 0)
+			return rc;
+
+                DEBUG_HOOK("NtCreateUser: %s\n", buffer);
+
+		PROCESS_INFORMATION processInformation;
+		processInformation.hProcess = *ProcessHandle;
+		processInformation.hThread = *ThreadHandle;
+
+		tup_inject_dll(&processInformation, s_depfilename, s_vardict_file);
+        }
 
 	return rc;
 }
@@ -1481,6 +1544,7 @@ static struct patch_entry patch_table[] = {
 #define MODULE_NAME "ntdll.dll"
 	HOOK(NtCreateFile),
 	HOOK(NtOpenFile),
+	HOOK(NtCreateUserProcess),
 #undef MODULE_NAME
 #define MODULE_NAME "msvcrt.dll"
 	HOOK(_access),
@@ -2131,6 +2195,13 @@ int tup_inject_dll(
 	BOOL bWow64 = 0;
 	IsWow64Process(lpProcessInformation->hProcess, &bWow64);
 
+
+	TCHAR buffer[1024];
+	if (GetModuleFileNameEx(lpProcessInformation->hProcess,0,buffer,1024)){
+		DEBUG_HOOK("Executable: %s\n", buffer);
+	}
+
+
 	// WOW64
 	DEBUG_HOOK("%s is WOW64: %i\n", GetCommandLineA(), bWow64);
 	if (bWow64) {
@@ -2212,7 +2283,7 @@ int tup_inject_dll(
 		if( !Wow64SetThreadContext( lpProcessInformation->hThread, &ctx ) )
 			return -1;
 	} else {
-#endif	
+#endif
 		HMODULE kernel32;
 		remote_thread_t remote;
 
@@ -2225,7 +2296,7 @@ int tup_inject_dll(
 		strcat(remote.execdir, execdir);
 		strcat(remote.dll_name, execdir);
 		strcat(remote.dll_name, "\\");
-#ifdef _WIN64		
+#ifdef _WIN64
 		strcat(remote.dll_name, "tup-dllinject.dll");
 #else
 		strcat(remote.dll_name, "tup-dllinject32.dll");
@@ -2299,7 +2370,7 @@ int tup_inject_dll(
 
 		if (!FlushInstructionCache(process, remote_data, code_size + sizeof(remote)))
 			return -1;
-			
+
 #ifdef _WIN64
 		ctx.Rip = (DWORD_PTR)remote_data;
 #else
