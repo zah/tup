@@ -2126,8 +2126,9 @@ int tup_inject_dll(
 	size_t code_size;
 	DWORD old_protect;
 	HANDLE process;
-	BOOL bWow64 = 0;
 
+#ifdef _WIN64
+	BOOL bWow64 = 0;
 	IsWow64Process(lpProcessInformation->hProcess, &bWow64);
 
 	// WOW64
@@ -2211,7 +2212,7 @@ int tup_inject_dll(
 		if( !Wow64SetThreadContext( lpProcessInformation->hThread, &ctx ) )
 			return -1;
 	} else {
-#ifdef _WIN64
+#endif	
 		HMODULE kernel32;
 		remote_thread_t remote;
 
@@ -2224,7 +2225,11 @@ int tup_inject_dll(
 		strcat(remote.execdir, execdir);
 		strcat(remote.dll_name, execdir);
 		strcat(remote.dll_name, "\\");
+#ifdef _WIN64		
 		strcat(remote.dll_name, "tup-dllinject.dll");
+#else
+		strcat(remote.dll_name, "tup-dllinject32.dll");
+#endif
 		strcat(remote.func_name, "tup_inject_init");
 
 		CONTEXT ctx;
@@ -2233,9 +2238,13 @@ int tup_inject_dll(
 			return -1;
 
 		/* Align code_size to a 16 byte boundary */
+#ifdef _WIN64
 		code_size = (  (uintptr_t) &remote_end
 			     - (uintptr_t) &remote_stub + 0x0F)
 			  & ~0x0F;
+#else
+    code_size = (sizeof(remote_stub32) + 0x0F) & ~0x0F;
+#endif
 
 
 		DEBUG_HOOK("Injecting dll '%s' '%s' %s' '%s'\n",
@@ -2265,11 +2274,19 @@ int tup_inject_dll(
 
 		unsigned char code[code_size];
 
+#ifdef _WIN64
 		memcpy( code, &remote_stub, code_size );
 		*(DWORD*)(code + 0x7) = low32(ctx.Rip);
 		*(DWORD*)(code + 0xf) = high32(ctx.Rip);
 		*(DWORD64*)(code + 0x30) = (long long unsigned int)(remote_data + code_size);
 		*(DWORD64*)(code + 0x3d) = (long long unsigned int)(DWORD_PTR)remote_data + ((DWORD_PTR)&remote_init - (DWORD_PTR)&remote_stub);
+#else
+		memcpy( code, &remote_stub32, code_size );
+		*(DWORD*)(code + 0x1) = ctx.Eip;											// Return addr
+		*(DWORD*)(code + 0x8) = (DWORD)((DWORD_PTR)remote_data + code_size);							// Arg (ptr to remote (TCB))
+		*(DWORD*)(code + 0xd) = (DWORD)((DWORD_PTR)remote_data + ((DWORD_PTR)&remote_stub32.remote_init - (DWORD_PTR)&remote_stub32));	// Func (ptr to remote_init)
+#endif
+
 
 		if (!WriteProcessMemory(process, remote_data, code, code_size, NULL))
 			return -1;
@@ -2282,16 +2299,19 @@ int tup_inject_dll(
 
 		if (!FlushInstructionCache(process, remote_data, code_size + sizeof(remote)))
 			return -1;
-
+			
+#ifdef _WIN64
 		ctx.Rip = (DWORD_PTR)remote_data;
+#else
+		ctx.Eip = (DWORD_PTR)remote_data;
+#endif
+
 		ctx.ContextFlags = CONTEXT_CONTROL;
 		if( !SetThreadContext( lpProcessInformation->hThread, &ctx ) )
 			return -1;
-#else
-		DEBUG_HOOK("Error: Shouldn't be hooking here for the 32-bit dll.\n");
-		return -1;
-#endif
+#ifdef _WIN64
 	}
+#endif
 
 	return 0;
 }
