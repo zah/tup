@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <tchar.h>
 
 #define TUP_TMP ".tup/tmp"
 
@@ -243,10 +244,6 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
 		|| strncmp(cmd, "bash ", 5) == 0
 		|| strncmp(cmd, "cmd ", 4) == 0;
 
-	//TODO: Why was this added?
-	// Causes more problems than it fixes
-//	have_shell = 1;
-
 	int need_sh = 0;
 
 	int need_cmd = 0;
@@ -435,12 +432,120 @@ int server_parser_stop(struct parser_server *ps)
 	return 0;
 }
 
+#include "tup/db.h"
+#include "tup/parser.h"
+#define BUFSIZE 4096
+#define CMD_SCRIPT_STR "cmd /Q /C "
 int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
 		      struct tupid_entries *env_root, char **rules)
 {
 	if(f || tupid || cmdline || env_root || rules) {/* unsupported */}
-	fprintf(stderr, "tup error: Run scripts are not yet supported on this platform.\n");
-	return -1;
+
+        DWORD dwRead;
+        CHAR *chBuf;
+	CHAR *cr;
+        PROCESS_INFORMATION piProcInfo;
+        STARTUPINFO  siStartInfo;
+        BOOL ret;
+
+	// Parse out name of script, without arguments and possibly './'
+	// TODO: Must guard against people putting interpreter in Tuprule 'i.e.: run sh -c 'script.sh'
+	char *nameBuf = strdup(cmdline);
+	char *name = strchr(nameBuf, ' ');
+	if (name != NULL) {
+		name[0] = 0;
+	}
+	name = nameBuf;
+	if (name[0] == '.' && name[1] == '/')
+		name += 2;
+
+	// Add a dependency, no idea where the linux version gets its dependency from...
+	struct tup_entry *script_entry;
+	if (tup_db_select_tent(tupid, name, &script_entry) == 0) {
+		struct tupfile *tf = (struct tupfile*) env_root;
+		tupid_tree_add_dup(&tf->input_root, script_entry->tnode.tupid);
+	}
+
+	// On windows, we invoke 'sh -c' only when using shell scripts, rest is parsed through cmd,
+	// should work with all kinds of scripts as long as they have a registered type
+	int need_shell = 0;
+
+	name = strchr(name, '.');
+	if (name != NULL) {
+		if (strncmp(name, ".sh", 3) == 0)
+			need_shell = 1;
+	}
+
+	CHAR cmdLine[128];
+	cmdLine[0]=0;
+
+	if (need_shell)
+		strcat(cmdLine, SHSTR);
+	else
+		strcat(cmdLine, CMD_SCRIPT_STR);
+
+        strcat(cmdLine, cmdline);
+	if (need_shell)
+                strcat(cmdLine, "'");
+
+	LPSTR szCmdline = cmdLine;
+
+        HANDLE g_hChildStd_OUT_Rd = NULL;
+        HANDLE g_hChildStd_OUT_Wr = NULL;
+
+	chBuf = malloc(BUFSIZE);
+	if (chBuf == NULL) {
+		perror("malloc");
+		return -1;
+	}
+
+        SECURITY_ATTRIBUTES saAttr;
+        saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+        saAttr.bInheritHandle = TRUE;
+        saAttr.lpSecurityDescriptor = NULL;
+
+        // Pipe stdout
+        if ( ! CreatePipe(&g_hChildStd_OUT_Rd, &g_hChildStd_OUT_Wr, &saAttr, 0) )
+                return -1;
+
+        // Ensure the read handle to the pipe for STDOUT is not inherited.
+        if ( ! SetHandleInformation(g_hChildStd_OUT_Rd, HANDLE_FLAG_INHERIT, 0) )
+                return -1;
+
+        // create process
+        memset(&siStartInfo, 0, sizeof(STARTUPINFO));
+        siStartInfo.cb = sizeof(STARTUPINFO);
+        siStartInfo.hStdOutput = g_hChildStd_OUT_Wr;
+        siStartInfo.dwFlags |= STARTF_USESTDHANDLES;
+
+        memset(&piProcInfo, 0, sizeof(PROCESS_INFORMATION));
+
+        ret = CreateProcessA(NULL, szCmdline, NULL, NULL, TRUE, 0, NULL, NULL, &siStartInfo, &piProcInfo);
+        if (!ret) {
+		fprintf(f, "tup error: unable to execute run-script: %s\n", cmdline);
+                return -1;
+        }
+
+        ret = ReadFile( g_hChildStd_OUT_Rd, chBuf, BUFSIZE, &dwRead, NULL);
+        if (!ret || dwRead == 0) {
+		fprintf(f, "tup error: unable to read output from run-script: (%lu bytes)\n", dwRead);
+                return -1;
+	}
+
+        CloseHandle(piProcInfo.hProcess);
+        CloseHandle(piProcInfo.hThread);
+
+	chBuf[dwRead] = 0;
+
+	// Remove occurences of carriage return
+	cr = strchr(chBuf, '\r');
+	while (cr != NULL) {
+		cr[0] = ' ';
+		cr = strchr(cr, '\r');
+	}
+	*rules = chBuf;
+
+        return 0;
 }
 
 static int initialize_depfile(struct server *s, char *depfile, HANDLE *h)
