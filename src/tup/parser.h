@@ -42,7 +42,6 @@ struct parser_server;
 struct lua_State;
 
 struct tupfile {
-	struct tupid_entries env_root;
 	tupid_t tupid;
 	struct variant *variant;
 	struct tup_entry *curtent;
@@ -54,6 +53,7 @@ struct tupfile {
 	struct vardb vdb;
 	struct node_vardb node_db;
 	struct tupid_entries cmd_root;
+	struct tupid_entries env_root;
 	struct string_entries bang_root;
 	struct tupid_entries input_root;
 	struct string_entries chain_root;

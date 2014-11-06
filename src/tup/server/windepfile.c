@@ -29,6 +29,10 @@
 #include "compat/win32/dirpath.h"
 #include "compat/win32/open_notify.h"
 #include "compat/dir_mutex.h"
+#include "tup/db.h"
+#include "tup/parser.h"
+#include "tup/fslurp.h"
+#include "tup/option.h"
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -66,6 +70,8 @@ int server_init(enum server_mode mode)
 
 	if(server_inited)
 		return 0;
+
+	//tup_inject_init(NULL);
 
 	if(GetModuleFileNameA(NULL, mycwd, PATH_MAX - 1) == 0)
 		return -1;
@@ -221,7 +227,7 @@ static int create_process(struct server *s, int dfd, char *cmdline,
 }
 
 #define SHSTR  "sh -c '"
-#define CMDSTR "CMD.EXE /C "
+#define CMDSTR "CMD.EXE /Q /C "
 int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newenv,
 		struct tup_entry *dtent, int full_deps)
 {
@@ -240,9 +246,9 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
 	struct file_entry *fent;
 	struct file_entry *tmp;
 
-	int have_shell = strncmp(cmd, "sh ", 3) == 0
-		|| strncmp(cmd, "bash ", 5) == 0
-		|| strncmp(cmd, "cmd ", 4) == 0;
+	int have_shell = strncasecmp(cmd, "sh ", 3) == 0
+		|| strncasecmp(cmd, "bash ", 5) == 0
+		|| strncasecmp(cmd, "cmd ", 4) == 0;
 
 	int need_sh = 0;
 
@@ -432,120 +438,119 @@ int server_parser_stop(struct parser_server *ps)
 	return 0;
 }
 
-#include "tup/db.h"
-#include "tup/parser.h"
-#define BUFSIZE 4096
-#define CMD_SCRIPT_STR "cmd /Q /C "
 int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
 		      struct tupid_entries *env_root, char **rules)
 {
-	if(f || tupid || cmdline || env_root || rules) {/* unsupported */}
+    if (f || tupid || cmdline || env_root || rules) {/* unsupported */ }
 
-        DWORD dwRead;
-        CHAR *chBuf;
-	CHAR *cr;
-        PROCESS_INFORMATION piProcInfo;
-        STARTUPINFO  siStartInfo;
-        BOOL ret;
+    struct tup_entry *tent;
+    struct server s;
+    struct tup_env te;
+    int need_shell = 0, full_deps = 0, dfd;
+    CHAR cmdLine[128];
+    char *cr;
 
-	// Parse out name of script, without arguments and possibly './'
-	// TODO: Must guard against people putting interpreter in Tuprule 'i.e.: run sh -c 'script.sh'
-	char *nameBuf = strdup(cmdline);
-	char *name = strchr(nameBuf, ' ');
-	if (name != NULL) {
-		name[0] = 0;
-	}
-	name = nameBuf;
-	if (name[0] == '.' && name[1] == '/')
-		name += 2;
+    // Parse out name of script, without arguments and possibly './'
+    char *nameBuf = strdup(cmdline);
+    char *name = strchr(nameBuf, ' ');
+    if (name != NULL) {
+        name[0] = 0;
+    }
+    name = nameBuf;
+    if (name[0] == '.' && name[1] == '/')
+        name += 2;
 
-	// Add a dependency, no idea where the linux version gets its dependency from...
-	struct tup_entry *script_entry;
-	if (tup_db_select_tent(tupid, name, &script_entry) == 0) {
-		struct tupfile *tf = (struct tupfile*) env_root;
-		tupid_tree_add_dup(&tf->input_root, script_entry->tnode.tupid);
-	}
+    // Add a dependency, no idea where the Linux version gets its dependency from...
+    struct tup_entry *script_entry;
+    if (tup_db_select_tent(tupid, name, &script_entry) == 0) {
+        struct tupfile *tf = (struct tupfile *) CONTAINING_RECORD(env_root, struct tupfile, env_root);
+        tupid_tree_add_dup(&tf->input_root, script_entry->tnode.tupid);
+    } else {
+        fprintf(f, "tup error: unable to parse run-script name. Do not specify 'cmd' or a shell after run directive.");
+        free(nameBuf);
+        return -1;
+    }
 
-	// On windows, we invoke 'sh -c' only when using shell scripts, rest is parsed through cmd,
-	// should work with all kinds of scripts as long as they have a registered type
-	int need_shell = 0;
+    // On windows, we invoke 'sh -c' only when using shell scripts, rest is parsed through cmd,
+    // should work with all kinds of scripts as long as they have a registered type
+    name = strchr(name, '.');
+    if (name != NULL) {
+        if (strncasecmp(name, ".sh", 3) == 0)
+            need_shell = 1;
+    }
 
-	name = strchr(name, '.');
-	if (name != NULL) {
-		if (strncmp(name, ".sh", 3) == 0)
-			need_shell = 1;
-	}
+    cmdLine[0] = 0;
+    if (need_shell)
+        strcat(cmdLine, SHSTR);
+    else
+        strcat(cmdLine, CMDSTR);
 
-	CHAR cmdLine[128];
-	cmdLine[0]=0;
+    strcat(cmdLine, cmdline);
+    if (need_shell)
+        strcat(cmdLine, "'");
 
-	if (need_shell)
-		strcat(cmdLine, SHSTR);
-	else
-		strcat(cmdLine, CMD_SCRIPT_STR);
+    free(nameBuf);
 
-        strcat(cmdLine, cmdline);
-	if (need_shell)
-                strcat(cmdLine, "'");
+    if (tup_db_get_environ(env_root, NULL, &te) < 0)
+        return -1;
 
-	LPSTR szCmdline = cmdLine;
+    full_deps = tup_option_get_int("updater.full_deps");
 
-        HANDLE g_hChildStd_OUT_Rd = NULL;
-        HANDLE g_hChildStd_OUT_Wr = NULL;
+    s.id = tupid;
+    s.output_fd = -1;
+    s.error_fd = -1;
+    s.exited = 0;
+    s.exit_status = 0;
+    s.signalled = 0;
+    s.error_mutex = NULL;
+    tent = tup_entry_get(tupid);
+    init_file_info(&s.finfo, tup_entry_variant(tent)->variant_dir);
 
-	chBuf = malloc(BUFSIZE);
-	if (chBuf == NULL) {
-		perror("malloc");
-		return -1;
-	}
+    dfd = tup_entry_open(tent);
 
-        SECURITY_ATTRIBUTES saAttr;
-        saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
-        saAttr.bInheritHandle = TRUE;
-        saAttr.lpSecurityDescriptor = NULL;
+    if (server_exec(&s, dfd, cmdLine, &te, tent, full_deps) != 0) {
+        fprintf(f, "tup-error: Unable to execute run-script: %s\n", cmdLine);
+        return -1;
+    }
 
-        // Pipe stdout
-        if ( ! CreatePipe(&g_hChildStd_OUT_Rd, &g_hChildStd_OUT_Wr, &saAttr, 0) )
+    environ_free(&te);
+
+    if (display_output(s.error_fd, 1, cmdline, 1, f) < 0)
+        return -1;
+    if (close(s.error_fd) < 0) {
+        perror("close(s.error_fd)");
+        return -1;
+    }
+
+    if (s.exited) {
+        if (s.exit_status == 0) {
+            struct buf b;
+            if (fslurp_null(s.output_fd, &b) < 0)
                 return -1;
-
-        // Ensure the read handle to the pipe for STDOUT is not inherited.
-        if ( ! SetHandleInformation(g_hChildStd_OUT_Rd, HANDLE_FLAG_INHERIT, 0) )
+            if (close(s.output_fd) < 0) {
+                perror("close(s.output_fd)");
                 return -1;
+            }
 
-        // create process
-        memset(&siStartInfo, 0, sizeof(STARTUPINFO));
-        siStartInfo.cb = sizeof(STARTUPINFO);
-        siStartInfo.hStdOutput = g_hChildStd_OUT_Wr;
-        siStartInfo.dwFlags |= STARTF_USESTDHANDLES;
-
-        memset(&piProcInfo, 0, sizeof(PROCESS_INFORMATION));
-
-        ret = CreateProcessA(NULL, szCmdline, NULL, NULL, TRUE, 0, NULL, NULL, &siStartInfo, &piProcInfo);
-        if (!ret) {
-		fprintf(f, "tup error: unable to execute run-script: %s\n", cmdline);
-                return -1;
+            // Remove all carriage return from output
+            cr = strchr(b.s, '\r');
+            while (cr != NULL) {
+                cr[0] = ' ';
+                cr = strchr(cr, '\r');
+            }
+            *rules = b.s;
+            return 0;
         }
+        fprintf(f, "tup error: run-script exited with failure code: %i\n", s.exit_status);
+    } else {
+        if (s.signalled) {
+            fprintf(f, "tup error: run-script terminated with signal %i\n", s.exit_sig);
+        } else {
+            fprintf(f, "tup error: run-script terminated abnormally.\n");
+        }
+    }
 
-        ret = ReadFile( g_hChildStd_OUT_Rd, chBuf, BUFSIZE, &dwRead, NULL);
-        if (!ret || dwRead == 0) {
-		fprintf(f, "tup error: unable to read output from run-script: (%lu bytes)\n", dwRead);
-                return -1;
-	}
-
-        CloseHandle(piProcInfo.hProcess);
-        CloseHandle(piProcInfo.hThread);
-
-	chBuf[dwRead] = 0;
-
-	// Remove occurences of carriage return
-	cr = strchr(chBuf, '\r');
-	while (cr != NULL) {
-		cr[0] = ' ';
-		cr = strchr(cr, '\r');
-	}
-	*rules = chBuf;
-
-        return 0;
+    return -1;
 }
 
 static int initialize_depfile(struct server *s, char *depfile, HANDLE *h)
