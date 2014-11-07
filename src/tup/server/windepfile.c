@@ -59,6 +59,19 @@ int server_post_exit(void)
 	return 0;
 }
 
+typedef HMODULE(WINAPI *LoadLibraryA_t)(const char*);
+typedef FARPROC(WINAPI *GetProcAddress_t)(HMODULE, const char*);
+
+struct remote_thread_t {
+    LoadLibraryA_t load_library;
+    GetProcAddress_t get_proc_address;
+    char depfilename[MAX_PATH];
+    char vardict_file[MAX_PATH];
+    char execdir[MAX_PATH];
+    char dll_name[MAX_PATH];
+    char func_name[256];
+};
+
 int server_init(enum server_mode mode)
 {
 	char *slash;
@@ -70,8 +83,6 @@ int server_init(enum server_mode mode)
 
 	if(server_inited)
 		return 0;
-
-	//tup_inject_init(NULL);
 
 	if(GetModuleFileNameA(NULL, mycwd, PATH_MAX - 1) == 0)
 		return -1;
@@ -137,6 +148,20 @@ int server_init(enum server_mode mode)
 		perror("fchdir");
 		return -1;
 	}
+
+    struct server s;
+    HANDLE h;
+    s.id = 0;
+    remote_thread_t t;
+    t.load_library = NULL;
+    t.get_proc_address = NULL;
+
+    if (initialize_depfile(&s, t.depfilename, &h) < 0) {
+        fprintf(stderr, "Error starting update server.\n");
+        return -1;
+    }
+
+    tup_inject_init(&t);
 
 	if(SetConsoleCtrlHandler(console_handler, TRUE) == 0) {
 		perror("SetConsoleCtrlHandler");
@@ -257,7 +282,7 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
 	if(dtent) {}
 	if(full_deps) {}
 
-	if(initialize_depfile(s, depfile, &h) < 0) {
+    if (initialize_depfile(s, depfile, &h) < 0) {
 		fprintf(stderr, "Error starting update server.\n");
 		return -1;
 	}
