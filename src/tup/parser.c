@@ -2328,18 +2328,18 @@ static int check_recursive_chain(struct tupfile *tf, const char *input_pattern,
 				 struct rule *r, const char *ext)
 {
 	struct path_list_head inp_list;
-	char *inp;
+	char *inP;
 	struct path_list *pl;
 	int extlen = ext ? strlen(ext) : 0;
 
-	inp = strdup(input_pattern);
-	if(!inp) {
+	inP = strdup(input_pattern);
+	if(!inP) {
 		parser_error(tf, "strdup");
 		return -1;
 	}
 
 	TAILQ_INIT(&inp_list);
-	if(get_path_list(tf, inp, &inp_list, tf->tupid, NULL, 0) < 0)
+	if(get_path_list(tf, inP, &inp_list, tf->tupid, NULL, 0) < 0)
 		return -1;
 	make_path_list_unique(&inp_list);
 
@@ -2378,7 +2378,7 @@ static int check_recursive_chain(struct tupfile *tf, const char *input_pattern,
 
 		del_pl(pl, &inp_list);
 	}
-	free(inp);
+	free(inP);
 	return 0;
 }
 

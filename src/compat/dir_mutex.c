@@ -57,7 +57,7 @@ void dir_mutex_lock(int dfd)
 
 	if(fchdir(dfd) < 0) {
 		perror("fchdir");
-		fprintf(stderr, "tup error: Failed to fchdir in a compat wrapper function %X.\n", __builtin_return_address(0));
+		fprintf(stderr, "tup error: Failed to fchdir in a compat wrapper function at %p.\n", __builtin_return_address(0));
 		exit(1);
 	}
 }
