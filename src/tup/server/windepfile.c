@@ -149,19 +149,36 @@ int server_init(enum server_mode mode)
 		return -1;
 	}
 
-    struct server s;
-    HANDLE h;
-    s.id = 0;
-    remote_thread_t t;
-    t.load_library = NULL;
-    t.get_proc_address = NULL;
+    //struct server s;
+    //HANDLE h;
+    //s.id = 0;
+    //remote_thread_t t;
+    //t.load_library = NULL;
+    //t.get_proc_address = NULL;
 
-    if (initialize_depfile(&s, t.depfilename, &h) < 0) {
-        fprintf(stderr, "Error starting update server.\n");
-        return -1;
-    }
+    //if (initialize_depfile(&s, t.depfilename, &h) < 0) {
+    //    fprintf(stderr, "Error starting update server.\n");
+    //    return -1;
+    //}
+    //struct tup_entry *tupEntry = tup_entry_get(1);
+    //if (tupEntry != NULL) {
+    //    fprintf(stderr, "Found it?\n");
 
-    tup_inject_init(&t);
+    //    struct variant *tupTopVar = variant_search(tupEntry->dt);
+    //    if (tupTopVar != NULL) {
+    //        fprintf(stderr, "Found it?\n");
+    //    } else {
+    //        fprintf(stderr, "Is null...\n");
+
+    //    }
+
+    //} else {
+    //    fprintf(stderr, "Is null...\n");
+
+    //}
+
+
+    tup_inject_init(NULL);
 
 	if(SetConsoleCtrlHandler(console_handler, TRUE) == 0) {
 		perror("SetConsoleCtrlHandler");
@@ -169,7 +186,7 @@ int server_init(enum server_mode mode)
 		return -1;
 	}
 
-	server_inited = 1;
+    server_inited = 1;
 	return 0;
 }
 
@@ -323,6 +340,13 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
 		strcat(cmdline, "'");
 	}
 
+    // Patch up directory slashes
+    char *slash = strchr(cmdline, '\\');
+    while (slash != NULL) {
+        slash[0] = '/';
+        slash = strchr(slash, '\\');
+    }
+
 	pthread_mutex_lock(&dir_mutex);
 	if(create_process(s, dfd, cmdline, newenv, &pi) < 0) {
 		pthread_mutex_lock(s->error_mutex);
@@ -474,6 +498,9 @@ int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
     int need_shell = 0, full_deps = 0, dfd;
     CHAR cmdLine[128];
     char *cr;
+    struct tup_entry *script_entry = NULL;
+
+    tent = tup_entry_get(tupid);
 
     // Parse out name of script, without arguments and possibly './'
     char *nameBuf = strdup(cmdline);
@@ -486,8 +513,21 @@ int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
         name += 2;
 
     // Add a dependency, no idea where the Linux version gets its dependency from...
-    struct tup_entry *script_entry;
     if (tup_db_select_tent(tupid, name, &script_entry) == 0) {
+
+        // Try variant
+        if (script_entry == NULL && tup_entry_variant_null(tent) != NULL) {
+            if (tent->variant->tent->parent->dt != 0) {
+                tup_db_select_tent(tent->variant->tent->parent->dt, name, &script_entry);
+            }
+        }
+
+        if (script_entry == NULL) {
+            fprintf(f, "tup error: unable to parse run-script name. Do not specify 'cmd' or a shell after run directive.");
+            free(nameBuf);
+            return -1;
+        }
+
         struct tupfile *tf = (struct tupfile *) CONTAINING_RECORD(env_root, struct tupfile, env_root);
         tupid_tree_add_dup(&tf->input_root, script_entry->tnode.tupid);
     } else {
@@ -528,7 +568,6 @@ int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
     s.exit_status = 0;
     s.signalled = 0;
     s.error_mutex = NULL;
-    tent = tup_entry_get(tupid);
     init_file_info(&s.finfo, tup_entry_variant(tent)->variant_dir);
 
     dfd = tup_entry_open(tent);

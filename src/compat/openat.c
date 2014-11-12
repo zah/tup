@@ -29,6 +29,9 @@ int openat(int dirfd, const char *pathname, int flags, ...)
 	int fd;
 	mode_t mode = 0;
 
+        char cwd[PATH_MAX];
+        _getcwd(cwd, PATH_MAX);
+
 	dir_mutex_lock(dirfd);
 	if(flags & O_CREAT) {
 		va_list ap;
@@ -37,6 +40,7 @@ int openat(int dirfd, const char *pathname, int flags, ...)
 		va_end(ap);
 	}
 	fd = open(pathname, flags, mode);
+        chdir(cwd);
 	dir_mutex_unlock();
 	return fd;
 }

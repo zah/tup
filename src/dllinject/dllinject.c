@@ -64,26 +64,95 @@ struct variant_dir {
     variant_dir *next;
 };
 
-static variant_dir *tup_variants = NULL;
+static variant_dir *TupVariants = NULL;
+static HANDLE hHeap = INVALID_HANDLE_VALUE;
+static BOOL isCmd = FALSE;
 
-#define HAS_VARIANTS (tup_variants != NULL)
+static void *MemoryPool = NULL;
+static size_t TotalMemory = 4096 * 4096;
+static size_t CurrentAllocatedMemory = 0;
+static HANDLE hMemoryLock;
 
-static void add_variant(const char *path)
+/*
+ * This memory allocator (which is really rudimentary) is used to avoid
+ * generating heap corruptions. At some point we should really track
+ * down the root cause of the the corruption instead of using this hack.
+ */
+static void *dll_malloc(size_t size)
 {
-    variant_dir *dir = malloc(sizeof(variant_dir));
-    if (dir == NULL)
-        return;
+    if (hHeap == INVALID_HANDLE_VALUE) {
+        DEBUG_HOOK("dll_malloc called without heap\n");
+        return NULL;
+    }
 
-    dir->name = strdup(path);
+    void *memory = NULL;
+
+    WaitForSingleObject(hMemoryLock, INFINITE);
+
+    // align memory to 16 byte boundary
+    size_t realSize = (size + 0x0F) & ~0x0F;
+
+    if ((realSize + CurrentAllocatedMemory) > TotalMemory) {
+        DEBUG_HOOK("OUT OF MEMORY\n");
+        goto out;
+    }
+
+    memory = (void*)((size_t)MemoryPool + CurrentAllocatedMemory);
+    CurrentAllocatedMemory += realSize;
+
+out:
+    ReleaseMutex(hMemoryLock);
+
+    //DEBUG_HOOK("Allocating %d bytes memory\n", size);
+    //size_t realSize = (size + 0x0F) & ~0x0F;
+    //memory = HeapAlloc(hHeap, 0, realSize);
+    //if (memory == NULL) {
+    //    DEBUG_HOOK("DllMalloc failed\n");
+    //} 
+    return memory;
+}
+
+static void dll_free(void *memory)
+{
+    if (hHeap == INVALID_HANDLE_VALUE) {
+        DEBUG_HOOK("dll_free called without heap\n");
+        return;
+    }
+
+    if (memory) {}
+
+    //BOOL rc = HeapFree(hHeap, 0, memory);
+    //if (!rc) {
+    //    DEBUG_HOOK("DllFree faile\n");
+    //}
+}
+
+#define HAS_VARIANTS() ({DEBUG_HOOK("VarCheck in: %s:%d\n", __FUNCTION__, __LINE__); (TupVariants != NULL);})
+//#define HAS_VARIANTS() (TupVariants != NULL)
+
+static BOOL add_variant(const char *path)
+{
+    variant_dir *dir = dll_malloc(sizeof(variant_dir));
+    if (dir == NULL)
+        return FALSE;
+
+    dir->name = dll_malloc(strlen(path) + 1);
+    if (dir->name == NULL)
+        return FALSE;
+
+    sprintf(dir->name, "%s", path);
+    dir->name[strlen(path)] = 0;
+
     dir->next = NULL;
 
-    if (tup_variants == NULL)
-        tup_variants = dir;
+    if (TupVariants == NULL)
+        TupVariants = dir;
     else {
-        variant_dir *ptr = tup_variants;
+        variant_dir *ptr = TupVariants;
         while (ptr->next != NULL) ptr = ptr->next;
         ptr->next = dir;
     }
+    return TRUE;
 }
 
 #pragma region Typedefinitions
@@ -398,11 +467,12 @@ typedef NTSTATUS(WINAPI *NtCreateUserProcess_t)(
     ULONG_PTR AttributeList
     );
 
-
 typedef int(*access_t)(const char *pathname, int mode);
 typedef FILE *(*fopen_t)(const char *path, const char *mode);
 typedef int(*rename_t)(const char *oldpath, const char *newpath);
 typedef int(*remove_t)(const char *pathname);
+typedef int(*stat64_t)(const char *path, void *buffer);
+typedef int(*stat32_t)(const char *path, void *buffer);
 
 static OpenFile_t			OpenFile_orig;
 static CreateFileA_t			CreateFileA_orig;
@@ -450,6 +520,8 @@ static access_t				_access_orig;
 static fopen_t				fopen_orig;
 static rename_t				rename_orig;
 static remove_t				remove_orig;
+static stat64_t       _stat64_orig;
+static stat32_t       _stat32_orig;
 #pragma endregion Typedefinitions
 
 #define TUP_CREATE_WRITE_FLAGS (GENERIC_WRITE | FILE_APPEND_DATA | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES)
@@ -492,7 +564,12 @@ static char *unicode_to_ansi(PUNICODE_STRING uni)
 
     len = WideCharToMultiByte(CP_UTF8, 0, uni->Buffer, uni->Length / sizeof(wchar_t), 0, 0, NULL, NULL);
     if (len > 0) {
-        name = malloc(len + 1);
+        name = dll_malloc(len + 1);
+        if (name == NULL) {
+            DEBUG_HOOK("Tried to allocate: %d bytes\n", len + 1);
+            perror("malloc uts");
+            return NULL;
+        }
         WideCharToMultiByte(CP_UTF8, 0, uni->Buffer, uni->Length / sizeof(wchar_t), name, len, NULL, NULL);
         name[len] = 0;
     }
@@ -506,7 +583,11 @@ static char *wchar_to_ansi(LPCWSTR uni)
 
     len = WideCharToMultiByte(CP_UTF8, 0, uni, -1, 0, 0, NULL, NULL);
     if (len > 0) {
-        name = malloc(len + 1);
+        name = dll_malloc(len + 1);
+        if (name == NULL) {
+            perror("malloc wts");
+            return NULL;
+        }
         WideCharToMultiByte(CP_UTF8, 0, uni, -1, name, len, NULL, NULL);
         name[len] = 0;
     }
@@ -520,12 +601,14 @@ static int ansi_to_wchar(const char *instr, LPWSTR outstr)
     len = MultiByteToWideChar(CP_UTF8, 0, instr, -1, NULL, 0);
     if (len > 0) {
         len *= sizeof(wchar_t);
-        outstr = malloc(len);
+        outstr = dll_malloc(len);
         if (outstr == NULL) {
-            perror("malloc");
+            perror("malloc atw");
             return 0;
         }
-        MultiByteToWideChar(CP_UTF8, 0, instr, -1, outstr, len);
+        if (MultiByteToWideChar(CP_UTF8, 0, instr, -1, outstr, len) < 0) {
+            DEBUG_HOOK("a2w FAILED\n");
+        }
     }
     return len;
 }
@@ -536,30 +619,30 @@ static int ansi_to_unicode(const char *instr, PUNICODE_STRING outstr)
 
     len = MultiByteToWideChar(CP_UTF8, 0, instr, -1, NULL, 0);
     if (len > 0) {
-        outstr->Length = outstr->MaximumLength = (len - 1) * sizeof(wchar_t);
-        outstr->Buffer = malloc(outstr->Length);
+        outstr->Length = outstr->MaximumLength = (len - 1) * sizeof(wchar_t); // -1 for no terminating null character
+        outstr->Buffer = dll_malloc(outstr->Length);
         if (outstr->Buffer == NULL) {
-            perror("malloc");
+            perror("malloc atu");
             return 0;
         }
-        MultiByteToWideChar(CP_UTF8, 0, instr, -1, outstr->Buffer, outstr->Length);
+        if (MultiByteToWideChar(CP_UTF8, 0, instr, -1, outstr->Buffer, outstr->Length) < 0) {
+            DEBUG_HOOK("MultiByteToWideChar FAILED\n");
+        }
     }
     return len;
 }
 
-static int variant_relative_name(const char *fileName, char *dest)
+static int variant_to_source(const char *fileName, char *dest)
 {
     char *src, *dst;
 
-    variant_dir *dir = tup_variants;
+    variant_dir *dir = TupVariants;
     int found = 0;
 
     if (!canon_path(fileName, dest))
         return -1;
 
     while (dir != NULL) {
-        //if (strncasecmp(dest, variantDir, strlen(variantDir)) != 0)
-        //    return -1;
         if (strncasecmp(dest, dir->name, strlen(dir->name)) == 0) {
             found = 1;
             break;
@@ -567,8 +650,9 @@ static int variant_relative_name(const char *fileName, char *dest)
         dir = dir->next;
     }
 
-    if (!found)
+    if (!found) {
         return -1;
+    }
 
     // Remove variant directory
     dst = dest + strlen(tuptopdir);
@@ -578,84 +662,88 @@ static int variant_relative_name(const char *fileName, char *dest)
 
     sprintf(dst, "%s", src);
 
-    DEBUG_HOOK("XXX: Rewrote '%s' => '%s'\n", fileName, dest);
-
     return 0;
 }
 
-static int variant_relative_wname(LPCWSTR fileName, LPWSTR dest)
+static int variant_to_sourceW(LPCWSTR fileName, LPWSTR dest)
 {
     char realName[MAX_PATH];
     char *ansi = wchar_to_ansi(fileName);
-    if (ansi == NULL)
+    if (ansi == NULL) {
         return -1;
+    }
 
-    if (variant_relative_name(ansi, realName) != 0) {
-        free(ansi);
+    if (variant_to_source(ansi, realName) != 0) {
+        dll_free(ansi);
         return -1;
     }
 
     ansi_to_wchar(realName, dest);
-    free(ansi);
-
-    DEBUG_HOOK("XXX: Rewrote '%s' => '%s'\n", ansi, realName);
+    dll_free(ansi);
 
     return 0;
 }
 
-static int variant_relative_name_unicode(POBJECT_ATTRIBUTES original, POBJECT_ATTRIBUTES *variant)
+static int variant_to_sourceOA(POBJECT_ATTRIBUTES original, POBJECT_ATTRIBUTES *variant)
 {
     char realName[MAX_PATH];
     PUNICODE_STRING unicodeVarName = NULL;
-    char *ansi = NULL;
+    char *ansi = NULL, *ansiName;
 
     ansi = unicode_to_ansi(original->ObjectName);
     if (ansi == NULL)
-        return -1;
+        goto error;
 
     // NT Paths need \??\ prefix to be valid
     snprintf(realName, MAX_PATH, "\\??\\");
-    if (variant_relative_name(ansi, realName + 4) != 0)
-        goto error;
 
-    unicodeVarName = malloc(sizeof(UNICODE_STRING));
+    ansiName = ansi;
+    if (strncmp(ansiName, "\\??\\", 4) == 0)
+        ansiName += 4;
+
+    if (variant_to_source(ansiName, realName + 4) != 0) {
+        goto error;
+    }
+
+    unicodeVarName = dll_malloc(sizeof(UNICODE_STRING));
     if (unicodeVarName == NULL)
         goto error;
 
-    ansi_to_unicode(realName, unicodeVarName);
+    if (ansi_to_unicode(realName, unicodeVarName) < 0) {
+        DEBUG_HOOK("Ansi_to_Unicode FAILED\n");
+        goto error;
+    }
 
-    *variant = malloc(sizeof(OBJECT_ATTRIBUTES));
-    if (*variant == NULL)
+    (*variant) = dll_malloc(sizeof(OBJECT_ATTRIBUTES));
+    if ((*variant) == NULL)
         goto error;
 
     InitializeObjectAttributes(*variant, unicodeVarName, original->Attributes, NULL, original->SecurityDescriptor);
 
-    free(ansi);
+    dll_free(ansi);
     return 0;
 
 error:
+    DEBUG_HOOK("VarRelName failed %s\n", ansi);
     if (ansi != NULL)
-        free(ansi);
+        dll_free(ansi);
     if (unicodeVarName != NULL) {
         if (unicodeVarName->Buffer != NULL)
-            free(unicodeVarName->Buffer);
-        free(unicodeVarName);
+            dll_free(unicodeVarName->Buffer);
+        dll_free(unicodeVarName);
     }
     return -1;
 }
 
-static void free_object_attribute(POBJECT_ATTRIBUTES *attrib)
+static void free_object_attribute(POBJECT_ATTRIBUTES attrib)
 {
-    return;
-
-    if (*attrib != NULL) {
-        if ((*attrib)->ObjectName != NULL) {
-            if ((*attrib)->ObjectName->Buffer != NULL)
-                free((*attrib)->ObjectName->Buffer);
-            free((*attrib)->ObjectName);
+    if (attrib != NULL) {
+        if (attrib->ObjectName != NULL) {
+            if (attrib->ObjectName->Buffer != NULL)
+                dll_free(attrib->ObjectName->Buffer);
+            dll_free(attrib->ObjectName);
         }
-        free(*attrib);
-        *attrib = NULL;
+        dll_free(attrib);
     }
 }
 
@@ -669,19 +757,25 @@ static HFILE WINAPI OpenFile_hook(
     char realName[MAX_PATH];
     LPCSTR fileName = lpFileName;
     HFILE f;
+    DWORD err;
 
     f = OpenFile_orig(
         fileName,
         lpReOpenBuff,
         uStyle);
 
-    if (f == HFILE_ERROR && HAS_VARIANTS) {
-        if (variant_relative_name(fileName, realName) == 0) {
+    if (f == HFILE_ERROR && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(fileName, realName) == 0) {
             fileName = realName;
             f = OpenFile_orig(
                 fileName,
                 lpReOpenBuff,
                 uStyle);
+        }
+        if (f == HFILE_ERROR) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -711,6 +805,7 @@ static HANDLE WINAPI CreateFileA_hook(
 {
     LPCSTR fileName = lpFileName;
     char realName[PATH_MAX];
+    DWORD lastError;
 
     HANDLE h = CreateFileA_orig(
         fileName,
@@ -721,8 +816,9 @@ static HANDLE WINAPI CreateFileA_hook(
         dwFlagsAndAttributes,
         hTemplateFile);
 
-    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS) {
-        if (variant_relative_name(lpFileName, realName) == 0) {
+    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS()) {
+        lastError = GetLastError();
+        if (variant_to_source(lpFileName, realName) == 0) {
             fileName = realName;
             h = CreateFileA_orig(
                 fileName,
@@ -733,9 +829,13 @@ static HANDLE WINAPI CreateFileA_hook(
                 dwFlagsAndAttributes,
                 hTemplateFile);
         }
+        if (h == INVALID_HANDLE_VALUE) {
+            SetLastError(lastError);
+            fileName = lpFileName;
+        }
     }
 
-    DEBUG_HOOK("CreateFileA '%s', %p:%x, %x, %x, %x, %x\n",
+    DEBUG_HOOK("CreateFileA '%s', %p:%X, %x, %x, %x, %x\n",
         fileName,
         h,
         GetLastError(),
@@ -767,6 +867,7 @@ static HANDLE WINAPI CreateFileW_hook(
 {
     LPCWSTR fileName = lpFileName;
     wchar_t realName[PATH_MAX];
+    DWORD err;
 
     HANDLE h = CreateFileW_orig(
         fileName,
@@ -777,8 +878,9 @@ static HANDLE WINAPI CreateFileW_hook(
         dwFlagsAndAttributes,
         hTemplateFile);
 
-    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS) {
-        if (variant_relative_wname(lpFileName, realName) == 0) {
+    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(lpFileName, realName) == 0) {
             fileName = realName;
             h = CreateFileW_orig(
                 fileName,
@@ -789,12 +891,15 @@ static HANDLE WINAPI CreateFileW_hook(
                 dwFlagsAndAttributes,
                 hTemplateFile);
         }
+        if (h == INVALID_HANDLE_VALUE) {
+            fileName = lpFileName;
+            SetLastError(err);
+        }
     }
 
-    DEBUG_HOOK("CreateFileW '%s' => '%s' (%s), %p:%x, %x, %x, %x, %x\n",
-        wchar_to_ansi(lpFileName),
-        wchar_to_ansi(fileName),
-        _getcwd(NULL, 0),
+    DEBUG_HOOK("CreateFileW '%S' => '%S', %p:%x, %x, %x, %x, %x\n",
+        lpFileName,
+        fileName,
         h,
         GetLastError(),
         dwDesiredAccess,
@@ -827,6 +932,7 @@ HANDLE WINAPI CreateFileTransactedA_hook(
 {
     LPCSTR fileName = lpFileName;
     char realName[PATH_MAX];
+    DWORD err;
 
     HANDLE h = CreateFileTransactedA_orig(
         fileName,
@@ -840,8 +946,9 @@ HANDLE WINAPI CreateFileTransactedA_hook(
         pusMiniVersion,
         lpExtendedParameter);
 
-    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS) {
-        if (variant_relative_name(lpFileName, realName) == 0) {
+    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(lpFileName, realName) == 0) {
             fileName = realName;
             h = CreateFileTransactedA_orig(
                 fileName,
@@ -854,6 +961,10 @@ HANDLE WINAPI CreateFileTransactedA_hook(
                 hTransaction,
                 pusMiniVersion,
                 lpExtendedParameter);
+        }
+        if (h == INVALID_HANDLE_VALUE) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -882,6 +993,7 @@ HANDLE WINAPI CreateFileTransactedW_hook(
 {
     LPCWSTR fileName = lpFileName;
     wchar_t realName[PATH_MAX];
+    DWORD err;
 
     HANDLE h = CreateFileTransactedW_orig(
         fileName,
@@ -895,8 +1007,9 @@ HANDLE WINAPI CreateFileTransactedW_hook(
         pusMiniVersion,
         lpExtendedParameter);
 
-    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS) {
-        if (variant_relative_wname(lpFileName, realName) == 0) {
+    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(lpFileName, realName) == 0) {
             fileName = realName;
             h = CreateFileTransactedW_orig(
                 fileName,
@@ -909,6 +1022,10 @@ HANDLE WINAPI CreateFileTransactedW_hook(
                 hTransaction,
                 pusMiniVersion,
                 lpExtendedParameter);
+        }
+        if (h == INVALID_HANDLE_VALUE) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -936,11 +1053,13 @@ NTSTATUS WINAPI NtCreateFile_hook(
     __in      PVOID EaBuffer,
     __in      ULONG EaLength)
 {
-    char *ansi;
+    char *ansi = NULL;
     POBJECT_ATTRIBUTES objectAttributes = ObjectAttributes;
     POBJECT_ATTRIBUTES variantObjectAttributes = NULL;
+    DWORD err;
+    NTSTATUS origRc, rc;
 
-    NTSTATUS rc = NtCreateFile_orig(FileHandle,
+    origRc = rc = NtCreateFile_orig(FileHandle,
         DesiredAccess,
         objectAttributes,
         IoStatusBlock,
@@ -952,10 +1071,10 @@ NTSTATUS WINAPI NtCreateFile_hook(
         EaBuffer,
         EaLength);
 
-    if (!NT_SUCCESS(rc) && HAS_VARIANTS) {
-        if (variant_relative_name_unicode(objectAttributes, &variantObjectAttributes) == 0) {
+    if (!NT_SUCCESS(rc) && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceOA(objectAttributes, &variantObjectAttributes) == 0) {
             objectAttributes = variantObjectAttributes;
-
             rc = NtCreateFile_orig(FileHandle,
                 DesiredAccess,
                 objectAttributes,
@@ -967,19 +1086,19 @@ NTSTATUS WINAPI NtCreateFile_hook(
                 CreateOptions,
                 EaBuffer,
                 EaLength);
-
-            if (!NT_SUCCESS(rc)) {
-                objectAttributes = ObjectAttributes;
-            }
+        }
+        if (!NT_SUCCESS(rc)) {
+            objectAttributes = ObjectAttributes;
+            rc = origRc;
+            SetLastError(err);
         }
     }
 
     ansi = unicode_to_ansi(objectAttributes->ObjectName);
-
-    if (ansi) {
+    if (ansi != NULL) {
         const char *name = ansi;
 
-        DEBUG_HOOK("NtCreateFile[%X] '%s': %x, %x, %x\n", rc, ansi, ShareAccess, DesiredAccess, CreateOptions);
+        DEBUG_HOOK("NtCreateFile[%X] '%s': %x, %x, %x (CD: %X)\n", rc, ansi, ShareAccess, DesiredAccess, CreateOptions, CreateDisposition);
         if (strncmp(name, "\\??\\", 4) == 0) {
             name += 4;
             /* Windows started trying to read a file called
@@ -990,18 +1109,17 @@ NTSTATUS WINAPI NtCreateFile_hook(
             if (name[0] != 0 && name[1] != ':')
                 goto out_free;
         }
-
         if (rc == STATUS_SUCCESS && DesiredAccess & TUP_CREATE_WRITE_FLAGS) {
             handle_file(name, NULL, ACCESS_WRITE);
         } else {
             handle_file(name, NULL, ACCESS_READ);
         }
     out_free:
-        free(ansi);
+        dll_free(ansi);
     }
 
     if (variantObjectAttributes != NULL)
-        free_object_attribute(&variantObjectAttributes);
+        free_object_attribute(variantObjectAttributes);
 
     return rc;
 }
@@ -1017,27 +1135,31 @@ NTSTATUS WINAPI NtOpenFile_hook(
     char *ansi;
     POBJECT_ATTRIBUTES objectAttributes = ObjectAttributes;
     POBJECT_ATTRIBUTES variantObjectAttributes = NULL;
+    NTSTATUS rc, origRc;
+    DWORD err;
 
-    NTSTATUS rc = NtOpenFile_orig(FileHandle,
+    origRc = rc = NtOpenFile_orig(FileHandle,
         DesiredAccess,
         objectAttributes,
         IoStatusBlock,
         ShareAccess,
         OpenOptions);
 
-    if (!NT_SUCCESS(rc) && HAS_VARIANTS) {
-        if (variant_relative_name_unicode(objectAttributes, &variantObjectAttributes) == 0) {
+    if (!NT_SUCCESS(rc) && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceOA(objectAttributes, &variantObjectAttributes) == 0) {
             objectAttributes = variantObjectAttributes;
-
             rc = NtOpenFile_orig(FileHandle,
                 DesiredAccess,
                 objectAttributes,
                 IoStatusBlock,
                 ShareAccess,
                 OpenOptions);
-
-            if (!NT_SUCCESS(rc))
-                objectAttributes = ObjectAttributes;
+        }
+        if (!NT_SUCCESS(rc)) {
+            objectAttributes = ObjectAttributes;
+            rc = origRc;
+            SetLastError(err);
         }
     }
 
@@ -1084,11 +1206,11 @@ NTSTATUS WINAPI NtOpenFile_hook(
             }
         }
     out_free:
-        free(ansi);
+        dll_free(ansi);
     }
 
     if (variantObjectAttributes != NULL)
-        free_object_attribute(&variantObjectAttributes);
+        free_object_attribute(variantObjectAttributes);
 
     return rc;
 }
@@ -1105,7 +1227,7 @@ NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
     ULONG_PTR CreateInfo,
     ULONG_PTR AttributeList)
 {
-    TCHAR buffer[1024];
+    CHAR buffer[1024];
     NTSTATUS rc = NtCreateUserProcess_orig(ProcessHandle,
         ThreadHandle, ProcessDesiredAccess,
         ThreadDesiredAccess,
@@ -1114,22 +1236,21 @@ NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
         ProcessFlags, ThreadFlags,
         ProcessParameters, CreateInfo, AttributeList);
 
-    if (rc != STATUS_SUCCESS) {
-        char *cmd = unicode_to_ansi(&ProcessParameters->CommandLine);
-        if (cmd) {
-            DEBUG_HOOK("XXX: Failed @ %d (Need rewriting?): %s", __LINE__, cmd);
-            free(cmd);
-        } else {
-            DEBUG_HOOK("XXX: Failed @ %d", __LINE__);
-        }
-
+    if (!NT_SUCCESS(rc)) {
         return rc;
     }
 
-    if (GetModuleFileNameEx(*ProcessHandle, 0, buffer, 1024)) {
+    // No need to inject here other than when caller is cmd.exe
+    if (isCmd) {
+
+        if (GetProcessImageFileNameA(*ProcessHandle, buffer, 1024) == 0) {
+            DEBUG_HOOK("Not able to get name: %X\n", GetLastError());
+            return rc;
+        }
+
         char *exec = strrchr(buffer, '\\');
         if (exec == NULL) {
-            DEBUG_HOOK("XXX: Failed to parse exec @ %d: %s", __LINE__, buffer);
+            DEBUG_HOOK("XXX: Failed to parse exec @ %d: %s\n", __LINE__, buffer);
             return rc;
         }
 
@@ -1138,7 +1259,7 @@ NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
             strncasecmp(exec, "mspdbsrv.exe", 12) == 0)
             return rc;
 
-        DEBUG_HOOK("NtCreateUser: %s\n", buffer);
+        DEBUG_HOOK("NtCreateUserProcess: %s\n", buffer);
 
         PROCESS_INFORMATION processInformation;
         processInformation.hProcess = *ProcessHandle;
@@ -1146,7 +1267,6 @@ NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
 
         tup_inject_dll(&processInformation, s_depfilename, s_vardict_file);
     }
-
     return rc;
 }
 
@@ -1154,15 +1274,20 @@ BOOL WINAPI DeleteFileA_hook(
     __in LPCSTR lpFileName)
 {
     char realName[MAX_PATH];
+    DWORD err;
     LPCSTR fileName = lpFileName;
     BOOL rc = DeleteFileA_orig(fileName);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_name(fileName, realName) == 0) {
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(fileName, realName) == 0) {
             fileName = realName;
             rc = DeleteFileA_orig(fileName);
-            if (!rc)
-                fileName = lpFileName;
+
+        }
+        if (!rc) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -1177,15 +1302,18 @@ BOOL WINAPI DeleteFileW_hook(
 {
     wchar_t realName[MAX_PATH];
     LPCWSTR fileName = lpFileName;
-
+    DWORD err;
     BOOL rc = DeleteFileW_orig(fileName);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_wname(fileName, realName) == 0) {
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(fileName, realName) == 0) {
             fileName = realName;
             rc = DeleteFileW_orig(fileName);
-            if (!rc)
-                fileName = lpFileName;
+        }
+        if (!rc) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -1201,14 +1329,18 @@ BOOL WINAPI DeleteFileTransactedA_hook(
 {
     char realName[MAX_PATH];
     LPCSTR fileName = lpFileName;
+    DWORD err;
     BOOL rc = DeleteFileTransactedA_orig(fileName, hTransaction);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_name(fileName, realName) == 0) {
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(fileName, realName) == 0) {
             fileName = realName;
             rc = DeleteFileTransactedA_orig(fileName, hTransaction);
-            if (!rc)
-                fileName = lpFileName;
+        }
+        if (!rc) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -1224,14 +1356,18 @@ BOOL WINAPI DeleteFileTransactedW_hook(
 {
     wchar_t realName[MAX_PATH];
     LPCWSTR fileName = lpFileName;
+    DWORD err;
     BOOL rc = DeleteFileTransactedW_orig(fileName, hTransaction);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_wname(fileName, realName) == 0) {
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(fileName, realName) == 0) {
             fileName = realName;
             rc = DeleteFileTransactedW_orig(fileName, hTransaction);
-            if (!rc)
-                fileName = lpFileName;
+        }
+        if (!rc) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -1248,18 +1384,21 @@ BOOL WINAPI MoveFileA_hook(
     char existingName[MAX_PATH], newName[MAX_PATH];
     LPCSTR existingFileName = lpExistingFileName;
     LPCSTR newFileName = lpNewFileName;
+    DWORD err;
     BOOL rc = MoveFileA_orig(existingFileName, newFileName);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_name(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_name(newFileName, newName) == 0)
+        if (variant_to_source(newFileName, newName) == 0)
             newFileName = newName;
-
-        rc = MoveFileA_orig(existingFileName, newFileName);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName)
+            rc = MoveFileA_orig(existingFileName, newFileName);
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
@@ -1276,31 +1415,27 @@ BOOL WINAPI MoveFileW_hook(
     wchar_t existingName[MAX_PATH], newName[MAX_PATH];
     LPCWSTR existingFileName = lpExistingFileName;
     LPCWSTR newFileName = lpNewFileName;
-    char *newAnsi = NULL, *existingAnsi = NULL;
+    DWORD err;
     BOOL rc = MoveFileW_orig(existingFileName, newFileName);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_wname(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_wname(newFileName, newName) == 0)
+        if (variant_to_sourceW(newFileName, newName) == 0)
             newFileName = newName;
 
-        rc = MoveFileW_orig(existingFileName, newFileName);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName)
+            rc = MoveFileW_orig(existingFileName, newFileName);
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file_w(existingFileName, newFileName, ACCESS_RENAME);
-
-    newAnsi = wchar_to_ansi(newFileName);
-    existingAnsi = wchar_to_ansi(existingFileName);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, newAnsi, existingAnsi, rc ? "SUCCESS" : "FAILED");
-    if (newAnsi)
-        free(newAnsi);
-    if (existingAnsi)
-        free(existingAnsi);
+    DEBUG_HOOK("%s '%S' => '%S' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1312,23 +1447,27 @@ BOOL WINAPI MoveFileExA_hook(
 {
     char existingName[MAX_PATH], newName[MAX_PATH];
     LPCSTR existingFileName = lpExistingFileName;
-    LPCTSTR newFileName = lpNewFileName;
+    LPCSTR newFileName = lpNewFileName;
+    DWORD err;
     BOOL rc = MoveFileExA_orig(existingFileName, newFileName, dwFlags);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_name(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_name(newFileName, newName) == 0)
+        if (variant_to_source(newFileName, newName) == 0)
             newFileName = newName;
-        rc = MoveFileExA_orig(existingFileName, newFileName, dwFlags);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName)
+            rc = MoveFileExA_orig(existingFileName, newFileName, dwFlags);
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file(existingFileName, newFileName, ACCESS_RENAME);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
+    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1341,31 +1480,26 @@ BOOL WINAPI MoveFileExW_hook(
     wchar_t existingName[MAX_PATH], newName[MAX_PATH];
     LPCWSTR existingFileName = lpExistingFileName;
     LPCWSTR newFileName = lpNewFileName;
-    char *newAnsi = NULL, *existingAnsi = NULL;
+    DWORD err;
     BOOL rc = MoveFileExW_orig(existingFileName, newFileName, dwFlags);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_wname(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_wname(newFileName, newName) == 0)
+        if (variant_to_sourceW(newFileName, newName) == 0)
             newFileName = newName;
-
-        rc = MoveFileExW_orig(existingFileName, newFileName, dwFlags);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName)
+            rc = MoveFileExW_orig(existingFileName, newFileName, dwFlags);
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file_w(existingFileName, newFileName, ACCESS_RENAME);
-
-    newAnsi = wchar_to_ansi(newFileName);
-    existingAnsi = wchar_to_ansi(existingFileName);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, newAnsi, existingAnsi, rc ? "SUCCESS" : "FAILED");
-    if (newAnsi)
-        free(newAnsi);
-    if (existingAnsi)
-        free(existingAnsi);
+    DEBUG_HOOK("%s '%S' => '%S' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1379,7 +1513,8 @@ BOOL WINAPI MoveFileWithProgressA_hook(
 {
     char existingName[MAX_PATH], newName[MAX_PATH];
     LPCSTR existingFileName = lpExistingFileName;
-    LPCTSTR newFileName = lpNewFileName;
+    LPCSTR newFileName = lpNewFileName;
+    DWORD err;
     BOOL rc = MoveFileWithProgressA_orig(
         existingFileName,
         newFileName,
@@ -1387,25 +1522,29 @@ BOOL WINAPI MoveFileWithProgressA_hook(
         lpData,
         dwFlags);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_name(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_name(newFileName, newName) == 0)
+        if (variant_to_source(newFileName, newName) == 0)
             newFileName = newName;
-        rc = MoveFileWithProgressA_orig(
-            existingFileName,
-            newFileName,
-            lpProgressRoutine,
-            lpData,
-            dwFlags);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName) {
+            rc = MoveFileWithProgressA_orig(
+                existingFileName,
+                newFileName,
+                lpProgressRoutine,
+                lpData,
+                dwFlags);
+        }
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file(existingFileName, newFileName, ACCESS_RENAME);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
+    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1420,7 +1559,7 @@ BOOL WINAPI MoveFileWithProgressW_hook(
     wchar_t existingName[MAX_PATH], newName[MAX_PATH];
     LPCWSTR existingFileName = lpExistingFileName;
     LPCWSTR newFileName = lpNewFileName;
-    char *newAnsi = NULL, *existingAnsi = NULL;
+    DWORD err;
     BOOL rc = MoveFileWithProgressW_orig(
         existingFileName,
         newFileName,
@@ -1428,32 +1567,30 @@ BOOL WINAPI MoveFileWithProgressW_hook(
         lpData,
         dwFlags);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_wname(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_wname(newFileName, newName) == 0)
+        if (variant_to_sourceW(newFileName, newName) == 0)
             newFileName = newName;
-
-        rc = MoveFileWithProgressW_orig(
-            existingFileName,
-            newFileName,
-            lpProgressRoutine,
-            lpData,
-            dwFlags);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName) {
+            rc = MoveFileWithProgressW_orig(
+                existingFileName,
+                newFileName,
+                lpProgressRoutine,
+                lpData,
+                dwFlags);
+        }
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file_w(existingFileName, newFileName, ACCESS_RENAME);
-    newAnsi = wchar_to_ansi(newFileName);
-    existingAnsi = wchar_to_ansi(existingFileName);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, newAnsi, existingAnsi, rc ? "SUCCESS" : "FAILED");
-    if (newAnsi)
-        free(newAnsi);
-    if (existingAnsi)
-        free(existingAnsi);
+    DEBUG_HOOK("%s '%S' => '%S' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
+
     return rc;
 }
 
@@ -1467,7 +1604,8 @@ BOOL WINAPI MoveFileTransactedA_hook(
 {
     char existingName[MAX_PATH], newName[MAX_PATH];
     LPCSTR existingFileName = lpExistingFileName;
-    LPCTSTR newFileName = lpNewFileName;
+    LPCSTR newFileName = lpNewFileName;
+    DWORD err;
     BOOL rc = MoveFileTransactedA_orig(
         existingFileName,
         newFileName,
@@ -1476,26 +1614,30 @@ BOOL WINAPI MoveFileTransactedA_hook(
         dwFlags,
         hTransaction);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_name(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_name(newFileName, newName) == 0)
+        if (variant_to_source(newFileName, newName) == 0)
             newFileName = newName;
-        rc = MoveFileTransactedA_orig(
-            existingFileName,
-            newFileName,
-            lpProgressRoutine,
-            lpData,
-            dwFlags,
-            hTransaction);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName) {
+            rc = MoveFileTransactedA_orig(
+                existingFileName,
+                newFileName,
+                lpProgressRoutine,
+                lpData,
+                dwFlags,
+                hTransaction);
+        }
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file(existingFileName, newFileName, ACCESS_RENAME);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
+    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1511,7 +1653,7 @@ BOOL WINAPI MoveFileTransactedW_hook(
     wchar_t existingName[MAX_PATH], newName[MAX_PATH];
     LPCWSTR existingFileName = lpExistingFileName;
     LPCWSTR newFileName = lpNewFileName;
-    char *newAnsi = NULL, *existingAnsi = NULL;
+    DWORD err;
     BOOL rc = MoveFileTransactedW_orig(
         existingFileName,
         newFileName,
@@ -1520,33 +1662,30 @@ BOOL WINAPI MoveFileTransactedW_hook(
         dwFlags,
         hTransaction);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_wname(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_wname(newFileName, newName) == 0)
+        if (variant_to_sourceW(newFileName, newName) == 0)
             newFileName = newName;
-
-        rc = MoveFileTransactedW_orig(
-            existingFileName,
-            newFileName,
-            lpProgressRoutine,
-            lpData,
-            dwFlags,
-            hTransaction);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName) {
+            rc = MoveFileTransactedW_orig(
+                existingFileName,
+                newFileName,
+                lpProgressRoutine,
+                lpData,
+                dwFlags,
+                hTransaction);
+        }
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file_w(existingFileName, newFileName, ACCESS_RENAME);
-    newAnsi = wchar_to_ansi(newFileName);
-    existingAnsi = wchar_to_ansi(existingFileName);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, newAnsi, existingAnsi, rc ? "SUCCESS" : "FAILED");
-    if (newAnsi)
-        free(newAnsi);
-    if (existingAnsi)
-        free(existingAnsi);
+    DEBUG_HOOK("%s '%S' => '%S' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1561,7 +1700,8 @@ BOOL WINAPI ReplaceFileA_hook(
 {
     char existingName[MAX_PATH], newName[MAX_PATH];
     LPCSTR existingFileName = lpReplacedFileName;
-    LPCTSTR newFileName = lpReplacementFileName;
+    LPCSTR newFileName = lpReplacementFileName;
+    DWORD err;
     BOOL rc = ReplaceFileA_orig(
         existingFileName,
         newFileName,
@@ -1570,26 +1710,30 @@ BOOL WINAPI ReplaceFileA_hook(
         lpExclude,
         lpReserved);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_name(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_name(newFileName, newName) == 0)
+        if (variant_to_source(newFileName, newName) == 0)
             newFileName = newName;
-        rc = ReplaceFileA_orig(
-            existingFileName,
-            newFileName,
-            lpBackupFileName,
-            dwReplaceFlags,
-            lpExclude,
-            lpReserved);
+        if (newFileName != lpReplacementFileName || existingFileName != lpReplacedFileName) {
+            rc = ReplaceFileA_orig(
+                existingFileName,
+                newFileName,
+                lpBackupFileName,
+                dwReplaceFlags,
+                lpExclude,
+                lpReserved);
+        }
         if (!rc) {
             existingFileName = lpReplacedFileName;
             newFileName = lpReplacementFileName;
+            SetLastError(err);
         }
     }
 
     handle_file(existingFileName, newFileName, ACCESS_RENAME);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
+    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1605,7 +1749,7 @@ BOOL WINAPI ReplaceFileW_hook(
     wchar_t existingName[MAX_PATH], newName[MAX_PATH];
     LPCWSTR existingFileName = lpReplacedFileName;
     LPCWSTR newFileName = lpReplacementFileName;
-    char *newAnsi = NULL, *existingAnsi = NULL;
+    DWORD err;
     BOOL rc = ReplaceFileW_orig(
         existingFileName,
         newFileName,
@@ -1614,33 +1758,30 @@ BOOL WINAPI ReplaceFileW_hook(
         lpExclude,
         lpReserved);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_wname(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_wname(newFileName, newName) == 0)
+        if (variant_to_sourceW(newFileName, newName) == 0)
             newFileName = newName;
-
-        rc = ReplaceFileW_orig(
-            existingFileName,
-            newFileName,
-            lpBackupFileName,
-            dwReplaceFlags,
-            lpExclude,
-            lpReserved);
+        if (newFileName != lpReplacementFileName || existingFileName != lpReplacedFileName) {
+            rc = ReplaceFileW_orig(
+                existingFileName,
+                newFileName,
+                lpBackupFileName,
+                dwReplaceFlags,
+                lpExclude,
+                lpReserved);
+        }
         if (!rc) {
             existingFileName = lpReplacedFileName;
             newFileName = lpReplacementFileName;
+            SetLastError(err);
         }
     }
 
     handle_file_w(existingFileName, newFileName, ACCESS_RENAME);
-    newAnsi = wchar_to_ansi(newFileName);
-    existingAnsi = wchar_to_ansi(existingFileName);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, newAnsi, existingAnsi, rc ? "SUCCESS" : "FAILED");
-    if (newAnsi)
-        free(newAnsi);
-    if (existingAnsi)
-        free(existingAnsi);
+    DEBUG_HOOK("%s '%S' => '%S' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1652,30 +1793,35 @@ BOOL WINAPI CopyFileA_hook(
 {
     char existingName[MAX_PATH], newName[MAX_PATH];
     LPCSTR existingFileName = lpExistingFileName;
-    LPCTSTR newFileName = lpNewFileName;
+    LPCSTR newFileName = lpNewFileName;
+    DWORD err;
     BOOL rc = CopyFileA_orig(
         existingFileName,
         newFileName,
         bFailIfExists);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_name(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_name(newFileName, newName) == 0)
+        if (variant_to_source(newFileName, newName) == 0)
             newFileName = newName;
-        rc = CopyFileA_orig(
-            existingFileName,
-            newFileName,
-            bFailIfExists);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName) {
+            rc = CopyFileA_orig(
+                existingFileName,
+                newFileName,
+                bFailIfExists);
+        }
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file(existingFileName, NULL, ACCESS_READ);
     handle_file(newFileName, NULL, ACCESS_WRITE);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
+    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1688,37 +1834,34 @@ BOOL WINAPI CopyFileW_hook(
     wchar_t existingName[MAX_PATH], newName[MAX_PATH];
     LPCWSTR existingFileName = lpExistingFileName;
     LPCWSTR newFileName = lpNewFileName;
-    char *newAnsi = NULL, *existingAnsi = NULL;
+    DWORD err;
     BOOL rc = CopyFileW_orig(
         existingFileName,
         newFileName,
         bFailIfExists);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_wname(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_wname(newFileName, newName) == 0)
+        if (variant_to_sourceW(newFileName, newName) == 0)
             newFileName = newName;
-
-        rc = CopyFileW_orig(
-            existingFileName,
-            newFileName,
-            bFailIfExists);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName) {
+            rc = CopyFileW_orig(
+                existingFileName,
+                newFileName,
+                bFailIfExists);
+        }
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file_w(existingFileName, NULL, ACCESS_READ);
     handle_file_w(newFileName, NULL, ACCESS_WRITE);
-    newAnsi = wchar_to_ansi(newFileName);
-    existingAnsi = wchar_to_ansi(existingFileName);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, newAnsi, existingAnsi, rc ? "SUCCESS" : "FAILED");
-    if (newAnsi)
-        free(newAnsi);
-    if (existingAnsi)
-        free(existingAnsi);
+    DEBUG_HOOK("%s '%S' => '%S' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1733,7 +1876,8 @@ BOOL WINAPI CopyFileExA_hook(
 {
     char existingName[MAX_PATH], newName[MAX_PATH];
     LPCSTR existingFileName = lpExistingFileName;
-    LPCTSTR newFileName = lpNewFileName;
+    LPCSTR newFileName = lpNewFileName;
+    DWORD err;
     BOOL rc = CopyFileExA_orig(
         existingFileName,
         newFileName,
@@ -1742,27 +1886,31 @@ BOOL WINAPI CopyFileExA_hook(
         pbCancel,
         dwCopyFlags);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_name(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_name(newFileName, newName) == 0)
+        if (variant_to_source(newFileName, newName) == 0)
             newFileName = newName;
-        rc = CopyFileExA_orig(
-            existingFileName,
-            newFileName,
-            lpProgressRoutine,
-            lpData,
-            pbCancel,
-            dwCopyFlags);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName) {
+            rc = CopyFileExA_orig(
+                existingFileName,
+                newFileName,
+                lpProgressRoutine,
+                lpData,
+                pbCancel,
+                dwCopyFlags);
+        }
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file(existingFileName, NULL, ACCESS_READ);
     handle_file(newFileName, NULL, ACCESS_WRITE);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
+    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1778,7 +1926,7 @@ BOOL WINAPI CopyFileExW_hook(
     wchar_t existingName[MAX_PATH], newName[MAX_PATH];
     LPCWSTR existingFileName = lpExistingFileName;
     LPCWSTR newFileName = lpNewFileName;
-    char *newAnsi = NULL, *existingAnsi = NULL;
+    DWORD err;
     BOOL rc = CopyFileExW_orig(
         existingFileName,
         newFileName,
@@ -1787,34 +1935,32 @@ BOOL WINAPI CopyFileExW_hook(
         pbCancel,
         dwCopyFlags);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_wname(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_wname(newFileName, newName) == 0)
+        if (variant_to_sourceW(newFileName, newName) == 0)
             newFileName = newName;
 
-        rc = CopyFileExW_orig(
-            existingFileName,
-            newFileName,
-            lpProgressRoutine,
-            lpData,
-            pbCancel,
-            dwCopyFlags);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName) {
+            rc = CopyFileExW_orig(
+                existingFileName,
+                newFileName,
+                lpProgressRoutine,
+                lpData,
+                pbCancel,
+                dwCopyFlags);
+        }
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file_w(existingFileName, NULL, ACCESS_READ);
     handle_file_w(newFileName, NULL, ACCESS_WRITE);
-    newAnsi = wchar_to_ansi(newFileName);
-    existingAnsi = wchar_to_ansi(existingFileName);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, newAnsi, existingAnsi, rc ? "SUCCESS" : "FAILED");
-    if (newAnsi)
-        free(newAnsi);
-    if (existingAnsi)
-        free(existingAnsi);
+    DEBUG_HOOK("%s '%S' => '%S' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1830,7 +1976,8 @@ BOOL WINAPI CopyFileTransactedA_hook(
 {
     char existingName[MAX_PATH], newName[MAX_PATH];
     LPCSTR existingFileName = lpExistingFileName;
-    LPCTSTR newFileName = lpNewFileName;
+    LPCSTR newFileName = lpNewFileName;
+    DWORD err;
     BOOL rc = CopyFileTransactedA_orig(
         existingFileName,
         newFileName,
@@ -1840,28 +1987,32 @@ BOOL WINAPI CopyFileTransactedA_hook(
         dwCopyFlags,
         hTransaction);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_name(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_name(newFileName, newName) == 0)
+        if (variant_to_source(newFileName, newName) == 0)
             newFileName = newName;
-        rc = CopyFileTransactedA_orig(
-            existingFileName,
-            newFileName,
-            lpProgressRoutine,
-            lpData,
-            pbCancel,
-            dwCopyFlags,
-            hTransaction);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName) {
+            rc = CopyFileTransactedA_orig(
+                existingFileName,
+                newFileName,
+                lpProgressRoutine,
+                lpData,
+                pbCancel,
+                dwCopyFlags,
+                hTransaction);
+        }
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file(existingFileName, NULL, ACCESS_READ);
     handle_file(newFileName, NULL, ACCESS_WRITE);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
+    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1878,7 +2029,7 @@ BOOL WINAPI CopyFileTransactedW_hook(
     wchar_t existingName[MAX_PATH], newName[MAX_PATH];
     LPCWSTR existingFileName = lpExistingFileName;
     LPCWSTR newFileName = lpNewFileName;
-    char *newAnsi = NULL, *existingAnsi = NULL;
+    DWORD err;
     BOOL rc = CopyFileTransactedW_orig(
         existingFileName,
         newFileName,
@@ -1888,35 +2039,32 @@ BOOL WINAPI CopyFileTransactedW_hook(
         dwCopyFlags,
         hTransaction);
 
-    if (!rc && HAS_VARIANTS) {
-        if (variant_relative_wname(existingFileName, existingName) == 0)
+    if (!rc && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(existingFileName, existingName) == 0)
             existingFileName = existingName;
-        if (variant_relative_wname(newFileName, newName) == 0)
+        if (variant_to_sourceW(newFileName, newName) == 0)
             newFileName = newName;
-
-        rc = CopyFileTransactedW_orig(
-            existingFileName,
-            newFileName,
-            lpProgressRoutine,
-            lpData,
-            pbCancel,
-            dwCopyFlags,
-            hTransaction);
+        if (newFileName != lpNewFileName || existingFileName != lpExistingFileName) {
+            rc = CopyFileTransactedW_orig(
+                existingFileName,
+                newFileName,
+                lpProgressRoutine,
+                lpData,
+                pbCancel,
+                dwCopyFlags,
+                hTransaction);
+        }
         if (!rc) {
             existingFileName = lpExistingFileName;
             newFileName = lpNewFileName;
+            SetLastError(err);
         }
     }
 
     handle_file_w(existingFileName, NULL, ACCESS_READ);
     handle_file_w(newFileName, NULL, ACCESS_WRITE);
-    newAnsi = wchar_to_ansi(newFileName);
-    existingAnsi = wchar_to_ansi(existingFileName);
-    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, newAnsi, existingAnsi, rc ? "SUCCESS" : "FAILED");
-    if (newAnsi)
-        free(newAnsi);
-    if (existingAnsi)
-        free(existingAnsi);
+    DEBUG_HOOK("%s '%s' => '%s' (%s)\n", __FUNCTION__, existingFileName, newFileName, rc ? "SUCCESS" : "FAILED");
 
     return rc;
 }
@@ -1925,18 +2073,21 @@ BOOL WINAPI CopyFileTransactedW_hook(
 DWORD WINAPI GetFileAttributesA_hook(
     __in LPCSTR lpFileName)
 {
+    char realName[PATH_MAX];
     LPCSTR fileName = lpFileName;
-
+    DWORD err;
     DWORD attributes = GetFileAttributesA_orig(fileName);
 
     // If failed, try variant
-    if (attributes == ATTRIB_FAIL && HAS_VARIANTS) {
-        char realName[PATH_MAX];
-        if (variant_relative_name(lpFileName, realName) == 0) {
+    if (attributes == ATTRIB_FAIL && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(lpFileName, realName) == 0) {
             fileName = realName;
             attributes = GetFileAttributesA_orig(fileName);
-            if (attributes == ATTRIB_FAIL)
-                fileName = lpFileName;
+        }
+        if (attributes == ATTRIB_FAIL) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -1955,15 +2106,19 @@ DWORD WINAPI GetFileAttributesW_hook(
     __in LPCWSTR lpFileName)
 {
     LPCWSTR fileName = lpFileName;
+    DWORD err;
     DWORD attributes = GetFileAttributesW_orig(fileName);
 
-    if (attributes == ATTRIB_FAIL && HAS_VARIANTS) {
+    if (attributes == ATTRIB_FAIL && HAS_VARIANTS()) {
+        err = GetLastError();
         wchar_t realName[PATH_MAX];
-        if (variant_relative_wname(lpFileName, realName) == 0) {
+        if (variant_to_sourceW(lpFileName, realName) == 0) {
             fileName = realName;
             attributes = GetFileAttributesW_orig(fileName);
-            if (attributes == ATTRIB_FAIL)
-                fileName = lpFileName;
+        }
+        if (attributes == ATTRIB_FAIL) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -1980,21 +2135,25 @@ BOOL WINAPI GetFileAttributesExA_hook(
     __out LPVOID lpFileInformation)
 {
     LPCSTR fileName = lpFileName;
+    DWORD err;
     DWORD attributes = GetFileAttributesExA_orig(
         fileName,
         fInfoLevelId,
         lpFileInformation);
 
-    if (attributes == ATTRIB_FAIL && HAS_VARIANTS) {
+    if (attributes == ATTRIB_FAIL && HAS_VARIANTS()) {
+        err = GetLastError();
         char realName[PATH_MAX];
-        if (variant_relative_name(lpFileName, realName) == 0) {
+        if (variant_to_source(lpFileName, realName) == 0) {
             fileName = realName;
             attributes = GetFileAttributesExA_orig(
                 fileName,
                 fInfoLevelId,
                 lpFileInformation);
-            if (attributes == ATTRIB_FAIL)
-                fileName = lpFileName;
+        }
+        if (attributes == ATTRIB_FAIL) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -2011,21 +2170,25 @@ BOOL WINAPI GetFileAttributesExW_hook(
     __out LPVOID lpFileInformation)
 {
     LPCWSTR fileName = lpFileName;
+    DWORD err;
     DWORD attributes = GetFileAttributesExW_orig(
         fileName,
         fInfoLevelId,
         lpFileInformation);
 
-    if (attributes == ATTRIB_FAIL && HAS_VARIANTS) {
+    if (attributes == ATTRIB_FAIL && HAS_VARIANTS()) {
+        err = GetLastError();
         wchar_t realName[PATH_MAX];
-        if (variant_relative_wname(lpFileName, realName) == 0) {
+        if (variant_to_sourceW(lpFileName, realName) == 0) {
             fileName = realName;
             attributes = GetFileAttributesExW_orig(
                 fileName,
                 fInfoLevelId,
                 lpFileInformation);
-            if (attributes == ATTRIB_FAIL)
-                fileName = lpFileName;
+        }
+        if (attributes == ATTRIB_FAIL) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -2042,14 +2205,18 @@ __out HANDLE WINAPI FindFirstFileA_hook(
 {
     char realName[MAX_PATH];
     LPCSTR fileName = lpFileName;
+    DWORD err;
     HANDLE h = FindFirstFileA_orig(fileName, lpFindFileData);
 
-    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS) {
-        if (variant_relative_name(fileName, realName) == 0) {
+    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(fileName, realName) == 0) {
             fileName = realName;
             h = FindFirstFileA_orig(fileName, lpFindFileData);
-            if (h == INVALID_HANDLE_VALUE)
-                fileName = lpFileName;
+        }
+        if (h == INVALID_HANDLE_VALUE) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -2064,14 +2231,18 @@ __out HANDLE WINAPI FindFirstFileW_hook(
 {
     wchar_t realName[MAX_PATH];
     LPCWSTR fileName = lpFileName;
+    DWORD err;
     HANDLE h = FindFirstFileW_orig(fileName, lpFindFileData);
 
-    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS) {
-        if (variant_relative_wname(fileName, realName) == 0) {
+    if (h == INVALID_HANDLE_VALUE && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_sourceW(fileName, realName) == 0) {
             fileName = realName;
             h = FindFirstFileW_orig(fileName, lpFindFileData);
-            if (h == INVALID_HANDLE_VALUE)
-                fileName = lpFileName;
+        }
+        if (h == INVALID_HANDLE_VALUE) {
+            fileName = lpFileName;
+            SetLastError(err);
         }
     }
 
@@ -2133,9 +2304,12 @@ BOOL WINAPI CreateProcessA_hook(
         lpCurrentDirectory);
 
     if (!ret) {
-        DEBUG_HOOK("XXX: Need rewrite @ %d? %s\n", __LINE__, lpCommandLine);
         return 0;
     }
+
+    // tup.exe will inject manually with correct depfilename
+    if (deph == INVALID_HANDLE_VALUE)
+        return ret;
 
     /* Ignore mspdbsrv.exe, since it continues to run in the background */
     if (!lpApplicationName || strcasestr(lpApplicationName, "mspdbsrv.exe") == NULL
@@ -2180,7 +2354,6 @@ BOOL WINAPI CreateProcessW_hook(
         lpCurrentDirectory);
 
     if (!ret) {
-        DEBUG_HOOK("XXX: Need rewrite @ %d? '%S'\n", __LINE__, lpCommandLine);
         return 0;
     }
 
@@ -2228,7 +2401,6 @@ BOOL WINAPI CreateProcessAsUserA_hook(
         lpCurrentDirectory);
 
     if (!ret) {
-        DEBUG_HOOK("XXX: Need rewrite @ %d? '%s'\n", __LINE__, lpCommandLine);
         return 0;
     }
 
@@ -2276,7 +2448,6 @@ BOOL WINAPI CreateProcessAsUserW_hook(
         lpCurrentDirectory);
 
     if (!ret) {
-        DEBUG_HOOK("XXX: Need rewrite @ %d? '%S'\n", __LINE__, lpCommandLine);
         return 0;
     }
 
@@ -2324,7 +2495,6 @@ BOOL WINAPI CreateProcessWithLogonW_hook(
         lpCurrentDirectory);
 
     if (!ret) {
-        DEBUG_HOOK("XXX: Need rewrite @ %d? '%S'\n", __LINE__, lpCommandLine);
         return 0;
     }
 
@@ -2368,7 +2538,6 @@ BOOL WINAPI CreateProcessWithTokenW_hook(
         lpCurrentDirectory);
 
     if (!ret) {
-        DEBUG_HOOK("XXX: Need rewrite @ %d? '%S'\n", __LINE__, lpCommandLine);
         return 0;
     }
 
@@ -2389,17 +2558,20 @@ int _access_hook(const char *pathname, int mode)
     int rc;
     char variantPathName[MAX_PATH];
     const char *path = pathname;
+    DWORD err;
 
     rc = _access_orig(path, mode);
 
-    if (rc == -1 && HAS_VARIANTS) {
-        if (variant_relative_name(path, variantPathName) == 0) {
+    if (rc == -1 && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(path, variantPathName) == 0) {
             path = variantPathName;
             rc = _access_orig(path, mode);
-
-            if (rc == -1)
-                path = pathname;
-        } 
+        }
+        if (rc == -1) {
+            path = pathname;
+            SetLastError(err);
+        }
     }
 
     DEBUG_HOOK("_access_hook: %s (%d)\n", path, rc);
@@ -2411,14 +2583,18 @@ FILE *fopen_hook(const char *path, const char *mode)
 {
     char variantPathName[MAX_PATH];
     const char *pathName = path;
+    DWORD err;
     FILE *ret = fopen_orig(pathName, mode);
 
-    if (ret == NULL && HAS_VARIANTS) {
-        if (variant_relative_name(pathName, variantPathName) == 0) {
+    if (ret == NULL && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(pathName, variantPathName) == 0) {
             pathName = variantPathName;
             ret = fopen_orig(pathName, mode);
-            if (ret == NULL)
-                pathName = path;
+        }
+        if (ret == NULL) {
+            pathName = path;
+            SetLastError(err);
         }
     }
 
@@ -2439,15 +2615,21 @@ int rename_hook(const char *oldpath, const char *newpath)
     int rc;
     char variantPathName[MAX_PATH];
     const char *path = oldpath;
+    DWORD err;
+
+    DEBUG_HOOK("Rename hook ENTER\n");
 
     rc = rename_orig(path, newpath);
 
-    if (rc == -1 && HAS_VARIANTS) {
-        if (variant_relative_name(path, variantPathName) == 0) {
+    if (rc == -1 && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(path, variantPathName) == 0) {
             path = variantPathName;
             rc = rename_orig(path, newpath);
-            if (rc == -1)
-                path = oldpath;
+        }
+        if (rc == -1) {
+            path = oldpath;
+            SetLastError(err);
         }
     }
 
@@ -2461,19 +2643,73 @@ int remove_hook(const char *pathname)
     int rc;
     char variantPathName[MAX_PATH];
     const char *path = pathname;
+    DWORD err;
     rc = remove_orig(path);
 
-    if (rc == -1 && HAS_VARIANTS) {
-        if (variant_relative_name(path, variantPathName) == 0) {
+    if (rc == -1 && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(path, variantPathName) == 0) {
             path = variantPathName;
             rc = remove_orig(path);
-            if (rc == -1)
-                path = pathname;
+        }
+        if (rc == -1) {
+            path = pathname;
+            SetLastError(err);
         }
     }
 
     DEBUG_HOOK("remove_hook: %s\n", path);
     handle_file(path, NULL, ACCESS_UNLINK);
+    return rc;
+}
+
+int _stat64_hook(const char *path, void *buffer)
+{
+    int rc;
+    char variantPathName[MAX_PATH];
+    const char *pathName = path;
+    DWORD err;
+
+    rc = _stat64_orig(pathName, buffer);
+    if (rc == -1 && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(pathName, variantPathName) == 0) {
+            pathName = variantPathName;
+            rc = _stat64_orig(pathName, buffer);
+        }
+        if (rc == -1) {
+            pathName = path;
+            SetLastError(err);
+        }
+    }
+
+    DEBUG_HOOK("_stat_hook: %s (%d)\n", pathName, rc);
+    handle_file(pathName, NULL, ACCESS_READ);
+    return rc;
+}
+
+int _stat32_hook(const char *path, void *buffer)
+{
+    int rc;
+    char variantPathName[MAX_PATH];
+    const char *pathName = path;
+    DWORD err;
+
+    rc = _stat32_orig(pathName, buffer);
+    if (rc == -1 && HAS_VARIANTS()) {
+        err = GetLastError();
+        if (variant_to_source(pathName, variantPathName) == 0) {
+            pathName = variantPathName;
+            rc = _stat32_orig(pathName, buffer);
+        }
+        if (rc == -1) {
+            pathName = path;
+            SetLastError(err);
+        }
+    }
+
+    DEBUG_HOOK("_stat_hook32: %s (%d)\n", pathName, rc);
+    handle_file(pathName, NULL, ACCESS_READ);
     return rc;
 }
 
@@ -2562,7 +2798,9 @@ static struct patch_entry patch_table[] = {
     HOOK(_access),
     //HOOK(fopen),  // Redundant, as it chains to NtCreateFile anyway
     HOOK(rename),
-    HOOK(remove)
+    HOOK(remove),
+    HOOK(_stat64),
+    HOOK(_stat32),
 };
 #undef HOOK
 #undef MODULE_NAME
@@ -2839,9 +3077,63 @@ static int open_vardict_file(const char *vardict_file)
 BOOL WINAPI DllMain(HANDLE HDllHandle, DWORD Reason, LPVOID Reserved)
 {
     (void)HDllHandle;
-    (void)Reason;
-    (void)Reserved;
-    return 1;
+
+    CHAR filename[1024];
+    HANDLE currentProcess;
+
+    currentProcess = GetCurrentProcess();
+    GetProcessImageFileNameA(currentProcess, filename, 1024);
+
+    switch (Reason) {
+    case DLL_PROCESS_ATTACH:
+    {
+        DEBUG_HOOK("DllMain attaching to %s (%s)\n", filename, Reserved == NULL ? "DYNAMIC" : "STATIC");
+        if (hHeap == INVALID_HANDLE_VALUE) {
+            //if (Reserved == NULL)
+            //if (bWow64 == TRUE)
+            //heap = HeapCreate(0, 0, 0);
+            //else
+            hHeap = GetProcessHeap();
+
+            if (hHeap == INVALID_HANDLE_VALUE) {
+                DEBUG_HOOK("Unable to create heap\n");
+                return FALSE;
+            } else {
+                MemoryPool = HeapAlloc(hHeap, 0, TotalMemory);
+                if (MemoryPool == NULL) {
+                    DEBUG_HOOK("Memory poolfailed\n");
+                    return FALSE;
+                }
+
+                hMemoryLock = CreateMutex(NULL, FALSE, NULL);
+                if (hMemoryLock == NULL) {
+                    DEBUG_HOOK("MemLock Failed\n");
+                    return FALSE;
+                }
+
+                DEBUG_HOOK("DLL Heap created at %X\n", hHeap);
+            }
+        } else {
+            DEBUG_HOOK("Heap already initialized!\n");
+        }
+        break;
+    }
+    case DLL_PROCESS_DETACH:
+        DEBUG_HOOK("DllMain detaching from %s (%s)\n", filename, Reserved == NULL ? "ERROR" : "TERMINATING");
+        // Only free heap if we are being dynamically unloaded
+        if (hHeap != INVALID_HANDLE_VALUE && Reserved == NULL) {
+
+            //TODO: Free variant directories perhaps
+            //etc cleanup
+        }
+        break;
+    case DLL_THREAD_ATTACH:
+        DEBUG_HOOK("DllMain attached a new thread to %s\n", filename);
+        break;
+    }
+
+
+    return TRUE;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2855,31 +3147,35 @@ DWORD tup_inject_init(remote_thread_t* r)
     int vardict_fd = -1;
     OSVERSIONINFO osinfo;
 
-    if (initialised)
+    if (initialised) {
+        DEBUG_HOOK("tup_inject_init ran twice..\n");
         return 0;
+    }
 
     initialised = 1;
 
-    if (!GetModuleFileNameA(NULL, filename, sizeof(filename))) {
+    if (!GetProcessImageFileNameA(GetCurrentProcess(), filename, sizeof(filename))) {
         return 1;
     }
 
-    DEBUG_HOOK("Inside tup_dllinject_init '%s' '%s' '%s' '%s' '%s'\n",
-        filename,
-        r->execdir,
-        r->dll_name,
-        r->func_name,
-        r->depfilename);
+    if (r != NULL) {
+        DEBUG_HOOK("Inside tup_dllinject_init '%s' '%s' '%s' '%s' '%s'\n",
+            filename,
+            r->execdir,
+            r->dll_name,
+            r->func_name,
+            r->depfilename);
+    } else {
+        DEBUG_HOOK("Inside tup_dllinject_init 'tup.exe'\n");
+    }
 
     DEBUG_HOOK(" - injected into %d: %s\n", GetCurrentProcessId(), GetCommandLineA());
 
-    if (r->load_library != NULL)
+    if (r != NULL) {
         tup_inject_setexecdir(r->execdir);
 
-    if (open_file(r->depfilename))
-        return 1;
-
-    if (r->load_library != NULL) {
+        if (open_file(r->depfilename))
+            return 1;
         if (open_vardict_file(r->vardict_file))
             return 1;
 
@@ -2891,20 +3187,24 @@ DWORD tup_inject_init(remote_thread_t* r)
         putenv(vardict_env);
 
         strcpy(s_vardict_file, r->vardict_file);
+
+        strcpy(s_depfilename, r->depfilename);
+
+        handle_file(filename, NULL, ACCESS_READ);
+
+        char *exe = strrchr(filename, '\\');
+        if (exe != NULL) {
+            exe++;
+            if (strncasecmp(exe, "cmd.exe", 7) == 0) {
+                isCmd = TRUE;
+                DEBUG_HOOK("I AM CMD!\n");
+            }
+            DEBUG_HOOK("exe: %s\n", exe);
+        }
     }
 
-    strcpy(s_depfilename, r->depfilename);
-
-    handle_file(filename, NULL, ACCESS_READ);
-
-    /* Find top-level directory, start at cwd */
+    /* Find top-level directory, start at CWD */
     _getcwd(tuptopdir, MAX_PATH);
-
-    /* Determine if we have variants or not */
-    // some cases... Either we are Tup, and have to consider lots of Variants...
-    // OR, we are a command in a variant
-    // OR no variants at all...
-
 
     WIN32_FIND_DATA ffd;
     HANDLE hFind = INVALID_HANDLE_VALUE;
@@ -2917,22 +3217,28 @@ DWORD tup_inject_init(remote_thread_t* r)
         if (PathFileExists(pathBuffer)) {
             foundTopLevel = TRUE;
         } else {
-            // Possibly a variant? (Not a variant if there is only a tup.config at the root)
-            if (!HAS_VARIANTS) {
+            // Possibly a variant? (Not a variant if there is only a tup.config at the root hence the else)
+            if (!HAS_VARIANTS()) {
                 snprintf(pathBuffer, MAX_PATH, "%s\\tup.config", tuptopdir);
                 if (PathFileExists(pathBuffer)) {
-                    add_variant(tuptopdir);
-                    DEBUG_HOOK("CMD in Variant: %s\n", tuptopdir);
+                    if (!add_variant(tuptopdir)) {
+                        DEBUG_HOOK("Unable to add variant\n");
+                    }
+                    DEBUG_HOOK("%s in Variant: %s\n", filename, tuptopdir);
                 }
             }
             snprintf(tuptopdir, MAX_PATH, "%.*s", (int)(strrchr(tuptopdir, '\\') - tuptopdir), tuptopdir);
         }
     }
 
-    DEBUG_HOOK("Set tuptop to: %s\n", tuptopdir);
+    if (foundTopLevel) {
+        DEBUG_HOOK("Found Tup-Src dir at: %s\n", tuptopdir);
+    } else {
+        DEBUG_HOOK("FATAL-ERROR: Did not find Tup-Src dir\n");
+    }
 
     // tup.exe needs to find all variant directories
-    if (r->load_library == NULL) {
+    if (r == NULL) {
         snprintf(pathBuffer, MAX_PATH, "%s\\*", tuptopdir);
         hFind = FindFirstFile(pathBuffer, &ffd);
         if (hFind != INVALID_HANDLE_VALUE) {
@@ -2942,7 +3248,9 @@ DWORD tup_inject_init(remote_thread_t* r)
                     if (PathFileExists(pathBuffer)) {
                         sprintf(pathBuffer, "%s\\%s", tuptopdir, ffd.cFileName);
                         DEBUG_HOOK("TUP: Found Variant Directory: %s\n", pathBuffer);
-                        add_variant(pathBuffer);
+                        if (!add_variant(pathBuffer)) {
+                            DEBUG_HOOK("Unable to add variant\n");
+                        }
                     }
                 }
             } while (FindNextFile(hFind, &ffd) != 0);
@@ -3039,39 +3347,6 @@ static void remote_end(void)
 }
 #endif
 
-
-#if __DBG_W64 == 1
-static void printHex(const void *lpvbits, const unsigned int n)
-{
-    char* data = (char*)lpvbits;
-    unsigned int i = 0;
-    char line[17] = {};
-    printf("%.8X | ", (unsigned char*)data);
-    while (i < n) {
-        line[i % 16] = *(data + i);
-        if ((line[i % 16] < 32) || (line[i % 16] > 126)) {
-            line[i % 16] = '.';
-        }
-        printf("%.2X", (unsigned char)*(data + i));
-        i++;
-        if (i % 4 == 0) {
-            if (i % 16 == 0) {
-                if (i < n - 1)
-                    printf(" | %s\n%.8X | ", &line, data + i);
-            } else {
-                printf(" ");
-            }
-        }
-    }
-    while (i % 16 > 0) {
-        (i % 4 == 0) ? printf("   ") : printf("  ");
-        line[i % 16] = ' ';
-        i++;
-    }
-    printf(" | %s\n", &line);
-}
-#endif
-
 inline long long unsigned int low32(long long unsigned int tall)
 {
     return tall & 0x00000000ffffffff;
@@ -3083,8 +3358,6 @@ inline long long unsigned int high32(long long unsigned int tall)
 
 struct remote_stub_t {
     uint8_t stub[23];
-    uint8_t fileA_Hook[39];
-    uint8_t fileW_Hook[39];
     uint8_t remote_init[60];
 }__attribute__((packed));
 
@@ -3100,67 +3373,32 @@ static struct remote_stub_t remote_stub32 = {
         0x9d,
         0xc3
     },
-    .fileA_Hook = {
+    .remote_init = {
             0x55,
             0x89, 0xe5,
-            0x83, 0xec, 0x18,
-            0x8b, 0x45, 0x0c,
-            0x89, 0x44, 0x24, 0x04,
-            0x8b, 0x45, 0x08,
+            0x53,
+            0x83, 0xec, 0x14,
+            0x8b, 0x5d, 0x08,
+            0x8d, 0x83, 0x14, 0x03, 0x00, 0x00,
             0x89, 0x04, 0x24,
-            0xff, 0x15, 0x78, 0x00, 0x00, 0x00,
+            0xff, 0x13,
+            0x85, 0xc0,
+            0x51,
+            0x74, 0x1b,				// JE 0x1b
+            0x8d, 0x93, 0x18, 0x04, 0x00, 0x00,
+            0x89, 0x54, 0x24, 0x04,
+            0x89, 0x04, 0x24,
+            0xff, 0x53, 0x04,
             0x85, 0xc0,
             0x52,
-            0x0f, 0x95, 0xc0,
             0x52,
-            0x0f, 0xb6, 0xc0,
+            0x74, 0x05,				// JE 0x05
+            0x89, 0x1c, 0x24,
+            0xff, 0xd0,
+            0x8b, 0x5d, 0xfc,
             0xc9,
-            0xc2, 0x08, 0x00
-        },
-
-        .fileW_Hook = {
-                0x55,
-                0x89, 0xe5,
-                0x83, 0xec, 0x18,
-                0x8b, 0x45, 0x0c,
-                0x89, 0x44, 0x24, 0x04,
-                0x8b, 0x45, 0x08,
-                0x89, 0x04, 0x24,
-                0xff, 0x15, 0x7c, 0x00, 0x00, 0x00,
-                0x85, 0xc0,
-                0x51,
-                0x0f, 0x95, 0xc0,
-                0x51,
-                0x0f, 0xb6, 0xc0,
-                0xc9,
-                0xc2, 0x08, 0x00
-            },
-
-            .remote_init = {
-                    0x55,
-                    0x89, 0xe5,
-                    0x53,
-                    0x83, 0xec, 0x14,
-                    0x8b, 0x5d, 0x08,
-                    0x8d, 0x83, 0x14, 0x03, 0x00, 0x00,
-                    0x89, 0x04, 0x24,
-                    0xff, 0x13,
-                    0x85, 0xc0,
-                    0x51,
-                    0x74, 0x1b,				// JE 0x1b
-                    0x8d, 0x93, 0x18, 0x04, 0x00, 0x00,
-                    0x89, 0x54, 0x24, 0x04,
-                    0x89, 0x04, 0x24,
-                    0xff, 0x53, 0x04,
-                    0x85, 0xc0,
-                    0x52,
-                    0x52,
-                    0x74, 0x05,				// JE 0x05
-                    0x89, 0x1c, 0x24,
-                    0xff, 0xd0,
-                    0x8b, 0x5d, 0xfc,
-                    0xc9,
-                    0xc2, 0x04, 0x00 }
+            0xc2, 0x04, 0x00
+        }
 };
 
 static uint32_t LOAD_LIBRARY_32 = 0;
@@ -3175,6 +3413,9 @@ BOOL get_wow64_addresses(void)
     PROCESS_INFORMATION piProcInfo;
     STARTUPINFO  siStartInfo;
     BOOL ret;
+
+    // Detect and avoid inception!
+    CreateProcessA_t createProcess = CreateProcessA_orig == NULL ? CreateProcessA : CreateProcessA_orig;
 
     TCHAR szCmdline[] = TEXT("tup32detect.exe");
 
@@ -3202,21 +3443,7 @@ BOOL get_wow64_addresses(void)
 
     memset(&piProcInfo, 0, sizeof(PROCESS_INFORMATION));
 
-    // Detect and avoid inception!
-    if (CreateProcessA_orig != NULL)
-        ret = CreateProcessA_orig(
-        NULL,
-        szCmdline,
-        NULL,
-        NULL,
-        TRUE,
-        0,
-        NULL,
-        NULL,
-        &siStartInfo,
-        &piProcInfo);
-    else
-        ret = CreateProcessA(
+    ret = createProcess(
         NULL,
         szCmdline,
         NULL,
@@ -3247,8 +3474,6 @@ BOOL get_wow64_addresses(void)
     return TRUE;
 }
 
-
-
 int tup_inject_dll(
     LPPROCESS_INFORMATION lpProcessInformation,
     const char *depfilename,
@@ -3263,9 +3488,8 @@ int tup_inject_dll(
     BOOL bWow64 = 0;
     IsWow64Process(lpProcessInformation->hProcess, &bWow64);
 
-
-    TCHAR buffer[1024];
-    if (GetModuleFileNameEx(lpProcessInformation->hProcess, 0, buffer, 1024)) {
+    CHAR buffer[1024];
+    if (GetProcessImageFileNameA(lpProcessInformation->hProcess, buffer, 1024)) {
         DEBUG_HOOK("%s is WOW64: %i\n", buffer, bWow64);
     }
 
@@ -3275,7 +3499,7 @@ int tup_inject_dll(
 
         if (GET_PROC_ADDRESS_32 == 0) {
             if (!get_wow64_addresses()) {
-                printf("Unable to retrieve WOW64 info\n");
+                DEBUG_HOOK("Unable to retrieve WOW64 info\n");
                 return -1;
             }
         }
@@ -3371,8 +3595,10 @@ int tup_inject_dll(
 
         CONTEXT ctx;
         ctx.ContextFlags = CONTEXT_CONTROL;
-        if (!GetThreadContext(lpProcessInformation->hThread, &ctx))
+        if (!GetThreadContext(lpProcessInformation->hThread, &ctx)) {
+            DEBUG_HOOK("XXX: Unable to get thread context\n");
             return -1;
+        }
 
         /* Align code_size to a 16 byte boundary */
 #ifdef _WIN64
@@ -3382,7 +3608,6 @@ int tup_inject_dll(
 #else
         code_size = (sizeof(remote_stub32) + 0x0F) & ~0x0F;
 #endif
-
 
         DEBUG_HOOK("Injecting dll '%s' '%s' %s' '%s'\n",
             remote.execdir,
@@ -3423,7 +3648,6 @@ int tup_inject_dll(
         *(DWORD*)(code + 0x8) = (DWORD)((DWORD_PTR)remote_data + code_size);							// Arg (ptr to remote (TCB))
         *(DWORD*)(code + 0xd) = (DWORD)((DWORD_PTR)remote_data + ((DWORD_PTR)&remote_stub32.remote_init - (DWORD_PTR)&remote_stub32));	// Func (ptr to remote_init)
 #endif
-
 
         if (!WriteProcessMemory(process, remote_data, code, code_size, NULL))
             return -1;

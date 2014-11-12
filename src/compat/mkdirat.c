@@ -31,11 +31,14 @@
 int mkdirat(int dirfd, const char *pathname, mode_t mode)
 {
 	int rc;
+        char cwd[PATH_MAX];
+        _getcwd(cwd, PATH_MAX);
 
 	if(mode) {/* for win32 */}
 
 	dir_mutex_lock(dirfd);
 	rc = mkdir(pathname, mode);
+	chdir(cwd);
 	dir_mutex_unlock();
 	return rc;
 }

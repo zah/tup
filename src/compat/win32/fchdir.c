@@ -41,6 +41,7 @@ int fchdir(int fd)
 		}
 		return chdir(path);
 	}
+
 	errno = EBADF;
 	return -1;
 }
