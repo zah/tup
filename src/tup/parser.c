@@ -160,6 +160,12 @@ static char *eval(struct tupfile *tf, const char *string, int allow_nodes);
 static int glob_parse(const char *base, int baselen, char *expanded, int *globidx);
 
 static int debug_run = 0;
+static int silent_unlink = 0;
+
+void parser_silent_unlink(void)
+{
+	silent_unlink = 1;
+}
 
 void parser_debug_run(void)
 {
@@ -3130,6 +3136,7 @@ static int validate_output(struct tupfile *tf, tupid_t dt, const char *name,
 {
 	struct tup_entry *tent;
 
+retry:
 	if(tup_db_select_tent(dt, name, &tent) < 0)
 		return -1;
 	if(tent) {
@@ -3158,6 +3165,21 @@ static int validate_output(struct tupfile *tf, tupid_t dt, const char *name,
 				}
 			}
 		} else {
+
+			if (silent_unlink) {
+				if (tup_file_del(dt, name, -1, NULL) != 0) {
+					fprintf(tf->f, "tup error: unable to unlink '%s' cwd: '%s'\n", name, getcwd(NULL, 0));
+					return -1;
+				} else {
+					fprintf(tf->f, "tup unlinked: '");
+					if (dt != tf->tupid) {
+						get_relative_dir(tf->f, NULL, NULL, tf->tupid, dt, NULL);
+						fprintf(tf->f, "/");
+					}
+					fprintf(tf->f, "%s'\n", name);
+				}
+				goto retry;
+			}
 			fprintf(tf->f, "tup error: Attempting to insert '");
 			if(dt != tf->tupid) {
 				get_relative_dir(tf->f, NULL, NULL, tf->tupid, dt, NULL);

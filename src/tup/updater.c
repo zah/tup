@@ -168,7 +168,9 @@ int updater(int argc, char **argv, int phase)
 			tup_entry_set_verbose(1);
 		} else if(strcmp(argv[x], "--debug-run") == 0) {
 			parser_debug_run();
-		} else if(strcmp(argv[x], "--no-scan") == 0) {
+		} else if (strcmp(argv[x], "--silent-unlink") == 0) {
+			parser_silent_unlink();
+		} else if (strcmp(argv[x], "--no-scan") == 0) {
 			do_scan = 0;
 		} else if(strncmp(argv[x], "-j", 2) == 0) {
 			num_jobs = strtol(argv[x]+2, NULL, 0);
@@ -1722,7 +1724,7 @@ static int create_work(struct graph *g, struct node *n)
 			if(n->already_used) {
 				rc = 0;
 			} else {
-				rc = parse(n, g, NULL, refactoring, 1);
+                rc = parse(n, g, NULL, refactoring, 1);
 			}
 			show_progress(-1, TUP_NODE_DIR);
 		}
@@ -1730,7 +1732,8 @@ static int create_work(struct graph *g, struct node *n)
 		  n->tent->type == TUP_NODE_FILE ||
 		  n->tent->type == TUP_NODE_GENERATED ||
 		  n->tent->type == TUP_NODE_GROUP ||
-		  n->tent->type == TUP_NODE_CMD) {
+		  n->tent->type == TUP_NODE_CMD ||
+		  n->tent->type == TUP_NODE_GENERATED_DIR) {
 		rc = 0;
 	} else {
 		fprintf(stderr, "tup error: Unknown node type %i with ID %lli named '%s' in create graph.\n", n->tent->type, n->tnode.tupid, n->tent->name.s);

@@ -160,6 +160,7 @@ struct node;
 struct graph;
 struct timespan;
 
+void parser_silent_unlink(void);
 void parser_debug_run(void);
 int parse(struct node *n, struct graph *g, struct timespan *ts, int refactoring, int use_server);
 
