@@ -493,10 +493,6 @@ struct tupid_entries *env_root, char **rules)
                     targetTupid = targetTent->parent->tnode.tupid;
                     targetTent = tup_entry_get(targetTupid);
 
-                    if (targetTent == NULL) {
-                        fprintf(stderr, "KEK\n");
-                    }
-
                     // Break out when we have a real name
                     name = strtok(NULL, "/");
                     if (strncmp(name, "..", 2) != 0)
