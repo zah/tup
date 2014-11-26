@@ -1732,8 +1732,7 @@ static int create_work(struct graph *g, struct node *n)
 		  n->tent->type == TUP_NODE_FILE ||
 		  n->tent->type == TUP_NODE_GENERATED ||
 		  n->tent->type == TUP_NODE_GROUP ||
-		  n->tent->type == TUP_NODE_CMD ||
-		  n->tent->type == TUP_NODE_GENERATED_DIR) {
+		  n->tent->type == TUP_NODE_CMD) {
 		rc = 0;
 	} else {
 		fprintf(stderr, "tup error: Unknown node type %i with ID %lli named '%s' in create graph.\n", n->tent->type, n->tnode.tupid, n->tent->name.s);

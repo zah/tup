@@ -66,12 +66,12 @@ struct variant_dir {
 
 static variant_dir *TupVariants = NULL;
 static HANDLE hHeap = INVALID_HANDLE_VALUE;
-static BOOL isCmd = FALSE;
 
 static void *MemoryPool = NULL;
 static size_t TotalMemory = 4096 * 4096;
 static size_t CurrentAllocatedMemory = 0;
 static HANDLE hMemoryLock;
+
 
 /*
  * This memory allocator (which is really rudimentary) is used to avoid
@@ -357,81 +357,6 @@ typedef BOOL(WINAPI *FindNextFileW_t)(
     __in  HANDLE hFindFile,
     __out LPWIN32_FIND_DATAW lpFindFileData);
 
-typedef BOOL(WINAPI *CreateProcessA_t)(
-    __in_opt    LPCSTR lpApplicationName,
-    __inout_opt LPSTR lpCommandLine,
-    __in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-    __in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    __in        BOOL bInheritHandles,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOA lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation);
-
-typedef BOOL(WINAPI * CreateProcessW_t)(
-    __in_opt    LPCWSTR lpApplicationName,
-    __inout_opt LPWSTR lpCommandLine,
-    __in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-    __in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    __in        BOOL bInheritHandles,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCWSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOW lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation);
-
-typedef BOOL(WINAPI *CreateProcessAsUserA_t)(
-    __in_opt    HANDLE hToken,
-    __in_opt    LPCSTR lpApplicationName,
-    __inout_opt LPSTR lpCommandLine,
-    __in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-    __in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    __in        BOOL bInheritHandles,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOA lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation);
-
-typedef BOOL(WINAPI *CreateProcessAsUserW_t)(
-    __in_opt    HANDLE hToken,
-    __in_opt    LPCWSTR lpApplicationName,
-    __inout_opt LPWSTR lpCommandLine,
-    __in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-    __in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    __in        BOOL bInheritHandles,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCWSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOW lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation
-    );
-
-typedef BOOL(WINAPI *CreateProcessWithLogonW_t)(
-    __in        LPCWSTR lpUsername,
-    __in_opt    LPCWSTR lpDomain,
-    __in        LPCWSTR lpPassword,
-    __in        DWORD dwLogonFlags,
-    __in_opt    LPCWSTR lpApplicationName,
-    __inout_opt LPWSTR lpCommandLine,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCWSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOW lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation);
-
-typedef BOOL(WINAPI *CreateProcessWithTokenW_t)(
-    __in        HANDLE hToken,
-    __in        DWORD dwLogonFlags,
-    __in_opt    LPCWSTR lpApplicationName,
-    __inout_opt LPWSTR lpCommandLine,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCWSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOW lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation);
-
 typedef NTSTATUS(WINAPI *NtOpenFile_t)(
     __out  PHANDLE FileHandle,
     __in   ACCESS_MASK DesiredAccess,
@@ -507,12 +432,6 @@ static FindFirstFileA_t			FindFirstFileA_orig;
 static FindFirstFileW_t			FindFirstFileW_orig;
 static FindNextFileA_t			FindNextFileA_orig;
 static FindNextFileW_t			FindNextFileW_orig;
-static CreateProcessA_t			CreateProcessA_orig;
-static CreateProcessW_t			CreateProcessW_orig;
-static CreateProcessAsUserA_t		CreateProcessAsUserA_orig;
-static CreateProcessAsUserW_t		CreateProcessAsUserW_orig;
-static CreateProcessWithLogonW_t	CreateProcessWithLogonW_orig;
-static CreateProcessWithTokenW_t	CreateProcessWithTokenW_orig;
 static NtCreateFile_t			NtCreateFile_orig;
 static NtOpenFile_t			NtOpenFile_orig;
 static NtCreateUserProcess_t		NtCreateUserProcess_orig;
@@ -747,6 +666,7 @@ static void free_object_attribute(POBJECT_ATTRIBUTES attrib)
     }
 }
 
+#pragma region API Hooks
 /* -------------------------------------------------------------------------- */
 
 static HFILE WINAPI OpenFile_hook(
@@ -1228,6 +1148,7 @@ NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
     ULONG_PTR AttributeList)
 {
     CHAR buffer[1024];
+    DWORD err;
     NTSTATUS rc = NtCreateUserProcess_orig(ProcessHandle,
         ThreadHandle, ProcessDesiredAccess,
         ThreadDesiredAccess,
@@ -1236,37 +1157,42 @@ NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
         ProcessFlags, ThreadFlags,
         ProcessParameters, CreateInfo, AttributeList);
 
+
+    DEBUG_HOOK("NtCreateUserProcess: %X\n", rc);
+
     if (!NT_SUCCESS(rc)) {
         return rc;
     }
 
-    // No need to inject here other than when caller is cmd.exe
-    if (isCmd) {
+    err = GetLastError();
 
-        if (GetProcessImageFileNameA(*ProcessHandle, buffer, 1024) == 0) {
-            DEBUG_HOOK("Not able to get name: %X\n", GetLastError());
-            return rc;
-        }
-
-        char *exec = strrchr(buffer, '\\');
-        if (exec == NULL) {
-            DEBUG_HOOK("XXX: Failed to parse exec @ %d: %s\n", __LINE__, buffer);
-            return rc;
-        }
-
-        exec++;
-        if (strncasecmp(exec, "tup32detect.exe", 15) == 0 ||
-            strncasecmp(exec, "mspdbsrv.exe", 12) == 0)
-            return rc;
-
-        DEBUG_HOOK("NtCreateUserProcess: %s\n", buffer);
-
-        PROCESS_INFORMATION processInformation;
-        processInformation.hProcess = *ProcessHandle;
-        processInformation.hThread = *ThreadHandle;
-
-        tup_inject_dll(&processInformation, s_depfilename, s_vardict_file);
+    if (GetProcessImageFileNameA(*ProcessHandle, buffer, 1024) == 0) {
+        DEBUG_HOOK("Not able to get name: %X\n", GetLastError());
+        goto done;
     }
+
+    char *exec = strrchr(buffer, '\\');
+    if (exec == NULL) {
+        DEBUG_HOOK("Failed to parse exec @ %d: %s\n", __LINE__, buffer);
+        goto done;
+    }
+
+    exec++;
+
+    if (strncasecmp(exec, "tup32detect.exe", 15) == 0 ||
+        strncasecmp(exec, "mspdbsrv.exe", 12) == 0)
+        goto done;
+
+    DEBUG_HOOK("NtCreateUserProcess: %s\n", buffer);
+
+    PROCESS_INFORMATION processInformation;
+    processInformation.hProcess = *ProcessHandle;
+    processInformation.hThread = *ThreadHandle;
+
+    tup_inject_dll(&processInformation, s_depfilename, s_vardict_file);
+
+done:
+    SetLastError(err);
     return rc;
 }
 
@@ -2274,285 +2200,6 @@ BOOL WINAPI FindNextFileW_hook(
     return 1;
 }
 
-BOOL WINAPI CreateProcessA_hook(
-    __in_opt    LPCSTR lpApplicationName,
-    __inout_opt LPSTR lpCommandLine,
-    __in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-    __in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    __in        BOOL bInheritHandles,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOA lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation)
-{
-    BOOL ret = CreateProcessA_orig(
-        lpApplicationName,
-        lpCommandLine,
-        lpProcessAttributes,
-        lpThreadAttributes,
-        bInheritHandles,
-        dwCreationFlags | CREATE_SUSPENDED,
-        lpEnvironment,
-        lpCurrentDirectory,
-        lpStartupInfo,
-        lpProcessInformation);
-
-    DEBUG_HOOK("CreateProcessA '%s' '%s' in '%s'\n",
-        lpApplicationName,
-        lpCommandLine,
-        lpCurrentDirectory);
-
-    if (!ret) {
-        return 0;
-    }
-
-    // tup.exe will inject manually with correct depfilename
-    if (deph == INVALID_HANDLE_VALUE)
-        return ret;
-
-    /* Ignore mspdbsrv.exe, since it continues to run in the background */
-    if (!lpApplicationName || strcasestr(lpApplicationName, "mspdbsrv.exe") == NULL
-        || strcasestr(lpApplicationName, "tup32detect.exe") == NULL) {
-        tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
-    }
-
-    if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
-        return 1;
-
-    return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
-}
-
-BOOL WINAPI CreateProcessW_hook(
-    __in_opt    LPCWSTR lpApplicationName,
-    __inout_opt LPWSTR lpCommandLine,
-    __in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-    __in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    __in        BOOL bInheritHandles,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCWSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOW lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation)
-{
-    BOOL ret = CreateProcessW_orig(
-        lpApplicationName,
-        lpCommandLine,
-        lpProcessAttributes,
-        lpThreadAttributes,
-        bInheritHandles,
-        dwCreationFlags | CREATE_SUSPENDED,
-        lpEnvironment,
-        lpCurrentDirectory,
-        lpStartupInfo,
-        lpProcessInformation);
-
-    DEBUG_HOOK("CreateProcessW %x '%S' '%S' in '%S'\n",
-        dwCreationFlags,
-        lpApplicationName,
-        lpCommandLine,
-        lpCurrentDirectory);
-
-    if (!ret) {
-        return 0;
-    }
-
-    /* Ignore mspdbsrv.exe, since it continues to run in the background */
-    if (!lpApplicationName || wcscasestr(lpApplicationName, L"mspdbsrv.exe") == NULL
-        || wcscasestr(lpApplicationName, L"tup32detect.exe") == NULL) {
-        tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
-    }
-
-    if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
-        return 1;
-
-    return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
-}
-
-BOOL WINAPI CreateProcessAsUserA_hook(
-    __in_opt    HANDLE hToken,
-    __in_opt    LPCSTR lpApplicationName,
-    __inout_opt LPSTR lpCommandLine,
-    __in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-    __in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    __in        BOOL bInheritHandles,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOA lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation)
-{
-    BOOL ret = CreateProcessAsUserA_orig(
-        hToken,
-        lpApplicationName,
-        lpCommandLine,
-        lpProcessAttributes,
-        lpThreadAttributes,
-        bInheritHandles,
-        dwCreationFlags | CREATE_SUSPENDED,
-        lpEnvironment,
-        lpCurrentDirectory,
-        lpStartupInfo,
-        lpProcessInformation);
-
-    DEBUG_HOOK("CreateProcessAsUserA '%s' '%s' in '%s'\n",
-        lpApplicationName,
-        lpCommandLine,
-        lpCurrentDirectory);
-
-    if (!ret) {
-        return 0;
-    }
-
-    /* Ignore mspdbsrv.exe, since it continues to run in the background */
-    if (!lpApplicationName || strcasestr(lpApplicationName, "mspdbsrv.exe") == NULL
-        || strcasestr(lpApplicationName, "tup32detect.exe") == NULL) {
-        tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
-    }
-
-    if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
-        return 1;
-
-    return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
-}
-
-BOOL WINAPI CreateProcessAsUserW_hook(
-    __in_opt    HANDLE hToken,
-    __in_opt    LPCWSTR lpApplicationName,
-    __inout_opt LPWSTR lpCommandLine,
-    __in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-    __in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    __in        BOOL bInheritHandles,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCWSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOW lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation)
-{
-    BOOL ret = CreateProcessAsUserW_orig(
-        hToken,
-        lpApplicationName,
-        lpCommandLine,
-        lpProcessAttributes,
-        lpThreadAttributes,
-        bInheritHandles,
-        dwCreationFlags | CREATE_SUSPENDED,
-        lpEnvironment,
-        lpCurrentDirectory,
-        lpStartupInfo,
-        lpProcessInformation);
-
-    DEBUG_HOOK("CreateProcessAsUserW '%S' '%S' in '%S'\n",
-        lpApplicationName,
-        lpCommandLine,
-        lpCurrentDirectory);
-
-    if (!ret) {
-        return 0;
-    }
-
-    /* Ignore mspdbsrv.exe, since it continues to run in the background */
-    if (!lpApplicationName || wcscasestr(lpApplicationName, L"mspdbsrv.exe") == NULL
-        || wcscasestr(lpApplicationName, L"tup32detect.exe") == NULL) {
-        tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
-    }
-
-    if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
-        return 1;
-
-    return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
-}
-
-BOOL WINAPI CreateProcessWithLogonW_hook(
-    __in        LPCWSTR lpUsername,
-    __in_opt    LPCWSTR lpDomain,
-    __in        LPCWSTR lpPassword,
-    __in        DWORD dwLogonFlags,
-    __in_opt    LPCWSTR lpApplicationName,
-    __inout_opt LPWSTR lpCommandLine,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCWSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOW lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation)
-{
-    BOOL ret = CreateProcessWithLogonW_orig(
-        lpUsername,
-        lpDomain,
-        lpPassword,
-        dwLogonFlags,
-        lpApplicationName,
-        lpCommandLine,
-        dwCreationFlags | CREATE_SUSPENDED,
-        lpEnvironment,
-        lpCurrentDirectory,
-        lpStartupInfo,
-        lpProcessInformation);
-
-    DEBUG_HOOK("CreateProcessWithLogonW '%S' '%S' in '%S'\n",
-        lpApplicationName,
-        lpCommandLine,
-        lpCurrentDirectory);
-
-    if (!ret) {
-        return 0;
-    }
-
-    /* Ignore mspdbsrv.exe, since it continues to run in the background */
-    if (!lpApplicationName || wcscasestr(lpApplicationName, L"mspdbsrv.exe") == NULL
-        || wcscasestr(lpApplicationName, L"tup32detect.exe") == NULL) {
-        tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
-    }
-
-    if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
-        return 1;
-
-    return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
-}
-
-BOOL WINAPI CreateProcessWithTokenW_hook(
-    __in        HANDLE hToken,
-    __in        DWORD dwLogonFlags,
-    __in_opt    LPCWSTR lpApplicationName,
-    __inout_opt LPWSTR lpCommandLine,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPCWSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOW lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation)
-{
-    BOOL ret = CreateProcessWithTokenW_orig(
-        hToken,
-        dwLogonFlags,
-        lpApplicationName,
-        lpCommandLine,
-        dwCreationFlags | CREATE_SUSPENDED,
-        lpEnvironment,
-        lpCurrentDirectory,
-        lpStartupInfo,
-        lpProcessInformation);
-
-    DEBUG_HOOK("CreateProcessWithTokenW '%S' '%S' in '%S'\n",
-        lpApplicationName,
-        lpCommandLine,
-        lpCurrentDirectory);
-
-    if (!ret) {
-        return 0;
-    }
-
-    /* Ignore mspdbsrv.exe, since it continues to run in the background */
-    if (!lpApplicationName || wcscasestr(lpApplicationName, L"mspdbsrv.exe") == NULL
-        || wcscasestr(lpApplicationName, L"tup32detect.exe") == NULL) {
-        tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
-    }
-
-    if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
-        return 1;
-
-    return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
-}
-
 int _access_hook(const char *pathname, int mode)
 {
     int rc;
@@ -2713,6 +2360,8 @@ int _stat32_hook(const char *path, void *buffer)
     return rc;
 }
 
+#pragma endregion
+
 /* -------------------------------------------------------------------------- */
 
 
@@ -2780,14 +2429,6 @@ static struct patch_entry patch_table[] = {
     HOOK(FindFirstFileW),
     HOOK(FindNextFileA),
     HOOK(FindNextFileW),
-    HOOK(CreateProcessA),
-    HOOK(CreateProcessW),
-#undef MODULE_NAME
-#define MODULE_NAME "advapi32.dll"
-    HOOK(CreateProcessAsUserA),
-    HOOK(CreateProcessAsUserW),
-    HOOK(CreateProcessWithLogonW),
-    HOOK(CreateProcessWithTokenW),
 #undef MODULE_NAME
 #define MODULE_NAME "ntdll.dll"
     HOOK(NtCreateFile),
@@ -3089,30 +2730,26 @@ BOOL WINAPI DllMain(HANDLE HDllHandle, DWORD Reason, LPVOID Reserved)
     {
         DEBUG_HOOK("DllMain attaching to %s (%s)\n", filename, Reserved == NULL ? "DYNAMIC" : "STATIC");
         if (hHeap == INVALID_HANDLE_VALUE) {
-            //if (Reserved == NULL)
-            //if (bWow64 == TRUE)
-            //heap = HeapCreate(0, 0, 0);
-            //else
             hHeap = GetProcessHeap();
 
             if (hHeap == INVALID_HANDLE_VALUE) {
-                DEBUG_HOOK("Unable to create heap\n");
+                DEBUG_HOOK("Unable to retrieve process heap\n");
                 return FALSE;
-            } else {
-                MemoryPool = HeapAlloc(hHeap, 0, TotalMemory);
-                if (MemoryPool == NULL) {
-                    DEBUG_HOOK("Memory poolfailed\n");
-                    return FALSE;
-                }
-
-                hMemoryLock = CreateMutex(NULL, FALSE, NULL);
-                if (hMemoryLock == NULL) {
-                    DEBUG_HOOK("MemLock Failed\n");
-                    return FALSE;
-                }
-
-                DEBUG_HOOK("DLL Heap created at %X\n", hHeap);
             }
+
+            MemoryPool = HeapAlloc(hHeap, 0, TotalMemory);
+            if (MemoryPool == NULL) {
+                DEBUG_HOOK("Memory pool allocation failed\n");
+                return FALSE;
+            }
+
+            hMemoryLock = CreateMutex(NULL, FALSE, NULL);
+            if (hMemoryLock == NULL) {
+                DEBUG_HOOK("Memory pool mutex creation failed\n");
+                return FALSE;
+            }
+
+            DEBUG_HOOK("DLL Heap created at %X\n", hHeap);
         } else {
             DEBUG_HOOK("Heap already initialized!\n");
         }
@@ -3121,10 +2758,8 @@ BOOL WINAPI DllMain(HANDLE HDllHandle, DWORD Reason, LPVOID Reserved)
     case DLL_PROCESS_DETACH:
         DEBUG_HOOK("DllMain detaching from %s (%s)\n", filename, Reserved == NULL ? "ERROR" : "TERMINATING");
         // Only free heap if we are being dynamically unloaded
+        // Not used while using process heap
         if (hHeap != INVALID_HANDLE_VALUE && Reserved == NULL) {
-
-            //TODO: Free variant directories perhaps
-            //etc cleanup
         }
         break;
     case DLL_THREAD_ATTACH:
@@ -3191,16 +2826,6 @@ DWORD tup_inject_init(remote_thread_t* r)
         strcpy(s_depfilename, r->depfilename);
 
         handle_file(filename, NULL, ACCESS_READ);
-
-        char *exe = strrchr(filename, '\\');
-        if (exe != NULL) {
-            exe++;
-            if (strncasecmp(exe, "cmd.exe", 7) == 0) {
-                isCmd = TRUE;
-                DEBUG_HOOK("I AM CMD!\n");
-            }
-            DEBUG_HOOK("exe: %s\n", exe);
-        }
     }
 
     /* Find top-level directory, start at CWD */
@@ -3261,6 +2886,8 @@ DWORD tup_inject_init(remote_thread_t* r)
     osinfo.dwOSVersionInfoSize = sizeof(osinfo);
     GetVersionEx(&osinfo);
 
+    DEBUG_HOOK("Os Version: %X - %X\n", osinfo.dwMajorVersion, osinfo.dwMinorVersion);
+
     if (osinfo.dwMajorVersion >= 6) {
         /* Only hot patch for Windows Vista and above. Hot patching
          * here gets our hook for FindFirstFile, which iat patching
@@ -3279,127 +2906,135 @@ DWORD tup_inject_init(remote_thread_t* r)
     return 0;
 }
 
-#ifdef _WIN64
-int remote_stub(void);
-__asm(
-".globl remote_stub\n"
-"remote_stub:\n"
-"subq $8, %rsp\n"
-"movl $0x556677, (%rsp)\n"		// return address, [0x7]
-"movl $0x11223344, 4(%rsp)\n"		// return address, [0xf]
-"pushf\n"
-"push %r15\n"
-"push %r14\n"
-"push %r13\n"
-"push %r12\n"
-"push %r11\n"
-"push %r10\n"
-"push %r9\n"
-"push %r8\n"
-"push %rbp\n"
-"push %rdi\n"
-"push %rsi\n"
-"push %rdx\n"
-"push %rcx\n"
-"push %rbx\n"
-"push %rax\n"
-"xorq %rcx, %rcx\n"
-"movq $0x1100000055667788, %rcx\n"	// function parameter [0x30]
-"xorq %rax, %rax\n"
-"movq $0x9900000055667788, %rax\n" 	// function to call, [0x3d]
-"call *%rax\n"
-"pop %rax\n"
-"pop %rbx\n"
-"pop %rcx\n"
-"pop %rdx\n"
-"pop %rsi\n"
-"pop %rdi\n"
-"pop %rbp\n"
-"pop %r8\n"
-"pop %r9\n"
-"pop %r10\n"
-"pop %r11\n"
-"pop %r12\n"
-"pop %r13\n"
-"pop %r14\n"
-"pop %r15\n"
-"popf\n"
-"ret"
-);
-
-static void WINAPI remote_init(remote_thread_t *r)
+inline long long unsigned int low32(long long unsigned int num)
 {
-    HMODULE h;
-    tup_init_t p;
-    h = r->load_library(r->dll_name);
-    if (!h)
-        return;
-
-    p = (tup_init_t)r->get_proc_address(h, r->func_name);
-    if (!p)
-        return;
-
-    p(r);
+    return num & 0x00000000ffffffff;
+}
+inline long long unsigned int high32(long long unsigned int num)
+{
+    return num >> 32;
 }
 
-static void remote_end(void)
-{
-}
-#endif
-
-inline long long unsigned int low32(long long unsigned int tall)
-{
-    return tall & 0x00000000ffffffff;
-}
-inline long long unsigned int high32(long long unsigned int tall)
-{
-    return tall >> 32;
-}
-
-struct remote_stub_t {
-    uint8_t stub[23];
+struct remote_stub32_t {
+    uint8_t stub[22];
     uint8_t remote_init[60];
 }__attribute__((packed));
 
-static struct remote_stub_t remote_stub32 = {
+static struct remote_stub32_t remote_stub32 = {
     .stub = {
-        0x68, 0x00, 0x00, 0x00, 0x00,
-        0x9c,
-        0x60,
-        0x68, 0xef, 0xbe, 0xad, 0xde,
-        0xb8, 0xef, 0xbe, 0xad, 0xde,
-        0xff, 0xd0,
-        0x61,
-        0x9d,
-        0xc3
+        0x68, 0x00, 0x00, 0x00, 0x00,       // push   $0x00000000
+        0x9c,                               // pushf
+        0x60,                               // pusha
+        0x68, 0xef, 0xbe, 0xad, 0xde,       // push   $0xdeadbeef
+        0xb8, 0xef, 0xbe, 0xad, 0xde,       // mov    $0xdeadbeef,%eax
+        0xff, 0xd0,                         // call   *%eax
+        0x61,                               // popa
+        0x9d,                               // popf
+        0xc3                                // ret
     },
     .remote_init = {
-            0x55,
-            0x89, 0xe5,
-            0x53,
-            0x83, 0xec, 0x14,
-            0x8b, 0x5d, 0x08,
-            0x8d, 0x83, 0x14, 0x03, 0x00, 0x00,
-            0x89, 0x04, 0x24,
-            0xff, 0x13,
-            0x85, 0xc0,
-            0x51,
-            0x74, 0x1b,				// JE 0x1b
-            0x8d, 0x93, 0x18, 0x04, 0x00, 0x00,
-            0x89, 0x54, 0x24, 0x04,
-            0x89, 0x04, 0x24,
-            0xff, 0x53, 0x04,
-            0x85, 0xc0,
-            0x52,
-            0x52,
-            0x74, 0x05,				// JE 0x05
-            0x89, 0x1c, 0x24,
-            0xff, 0xd0,
-            0x8b, 0x5d, 0xfc,
-            0xc9,
-            0xc2, 0x04, 0x00
-        }
+        0x55,                               // push   %ebp
+        0x89, 0xe5,                         // mov    %esp,%ebp
+        0x53,                               // push   %ebx
+        0x83, 0xec, 0x14,                   // sub    $0x14,%esp
+        0x8b, 0x5d, 0x08,                   // mov    0x8(%ebp),%ebx
+        0x8d, 0x83, 0x14, 0x03, 0x00, 0x00, // lea    0x314(%ebx),%eax
+        0x89, 0x04, 0x24,                   // mov    %eax,(%esp)
+        0xff, 0x13,                         // call   *(%ebx)
+        0x85, 0xc0,                         // test   %eax,%eax
+        0x51,                               // push   %ecx
+        0x74, 0x1b,				            // je 0x1b
+        0x8d, 0x93, 0x18, 0x04, 0x00, 0x00, // lea    0x418(%ebx),%edx
+        0x89, 0x54, 0x24, 0x04,             // mov    %edx,0x4(%esp)
+        0x89, 0x04, 0x24,                   // mov    %eax,(%esp)
+        0xff, 0x53, 0x04,                   // call   *0x4(%ebx)
+        0x85, 0xc0,                         // test   %eax,%eax
+        0x52,                               // push   %edx
+        0x52,                               // push   %edx
+        0x74, 0x05,				            // je 0x05
+        0x89, 0x1c, 0x24,                   // mov    %ebx,(%esp)
+        0xff, 0xd0,                         // call   *%eax
+        0x8b, 0x5d, 0xfc,                   // mov    -0x4(%ebp),%ebx
+        0xc9,                               // leave
+        0xc2, 0x04, 0x00                    // ret    $0x4
+    }
 };
+
+#ifdef _WIN64
+
+struct remote_stub64_t {
+    uint8_t stub[96];
+    uint8_t remote_init[56];
+}__attribute__((packed));
+
+static struct remote_stub64_t remote_stub64 = {
+    .stub = {
+        0x48, 0x83, 0xec, 0x08,                                     // sub    $0x8,%rsp
+        0xc7, 0x04, 0x24, 0x77, 0x66, 0x55, 0x00,                   // movl   $0x556677,(%rsp)
+        0xc7, 0x44, 0x24, 0x04, 0x44, 0x33, 0x22, 0x11,             // movl   $0x11223344,0x4(%rsp)
+        0x9c,                                                       // pushfq
+        0x41, 0x57,                                                 // push   %r15
+        0x41, 0x56,                                                 // push   %r14
+        0x41, 0x55,                                                 // push   %r13
+        0x41, 0x54,                                                 // push   %r12
+        0x41, 0x53,                                                 // push   %r11
+        0x41, 0x52,                                                 // push   %r10
+        0x41, 0x51,                                                 // push   %r9
+        0x41, 0x50,                                                 // push   %r8
+        0x55,                                                       // push   %rbp
+        0x57,                                                       // push   %rdi
+        0x56,                                                       // push   %rsi
+        0x52,                                                       // push   %rdx
+        0x51,                                                       // push   %rcx
+        0x53,                                                       // push   %rbx
+        0x50,                                                       // push   %rax
+        0x48, 0x31, 0xc9,                                           // xor    %rcx,%rcx
+        0x48, 0xb9, 0x88, 0x77, 0x66, 0x55, 0x00, 0x00, 0x00, 0x11, // movabs $0x1100000055667788,%rcx
+        0x48, 0x31, 0xc0,                                           // xor    %rax,%rax
+        0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x00, 0x00, 0x00, 0x99, // movabs $0x9900000055667788,%rax
+        0xff, 0xd0,                                                 // callq  *%rax
+        0x58,                                                       // pop    %rax
+        0x5b,                                                       // pop    %rbx
+        0x59,                                                       // pop    %rcx
+        0x5a,                                                       // pop    %rdx
+        0x5e,                                                       // pop    %rsi
+        0x5f,                                                       // pop    %rdi
+        0x5d,                                                       // pop    %rbp
+        0x41, 0x58,                                                 // pop    %r8
+        0x41, 0x59,                                                 // pop    %r9
+        0x41, 0x5a,                                                 // pop    %r10
+        0x41, 0x5b,                                                 // pop    %r11
+        0x41, 0x5c,                                                 // pop    %r12
+        0x41, 0x5d,                                                 // pop    %r13
+        0x41, 0x5e,                                                 // pop    %r14
+        0x41, 0x5f,                                                 // pop    %r15
+        0x9d,                                                       // popfq
+        0xc3,                                                       // retq
+    },
+    .remote_init = {
+        0x53,                                                       // push   %rbx
+        0x48, 0x83, 0xec, 0x20,                                     // sub    $0x20,%rsp
+        0x48, 0x89, 0xcb,                                           // mov    %rcx,%rbx
+        0x48, 0x8d, 0x89, 0x1c, 0x03, 0x00, 0x00,                   // lea    0x31c(%rcx),%rcx
+        0xff, 0x13,                                                 // callq  *(%rbx)
+        0x48, 0x85, 0xc0,                                           // test   %rax,%rax
+        0x74, 0x1c,                                                 // je     93 <remote_init+0x33>      // jmpq version
+        0x48, 0x8d, 0x93, 0x20, 0x04, 0x00, 0x00,                   // lea    0x420(%rbx),%rdx
+        0x48, 0x89, 0xc1,                                           // mov    %rax,%rcx
+        0xff, 0x53, 0x08,                                           // callq  *0x8(%rbx)
+        0x48, 0x85, 0xc0,                                           // test   %rax,%rax
+        0x74, 0x0a,                                                 // je     93 <remote_init+0x33>      // jmpq version
+        0x48, 0x89, 0xd9,                                           // mov    %rbx,%rcx
+        0x48, 0x83, 0xc4, 0x20,                                     // add    $0x20,%rsp
+        0x5b,                                                       // pop    %rbx
+        0xff, 0xe0,                                                 // jmpq   *%rax
+        0x48, 0x83, 0xc4, 0x20,                                     // add    $0x20,%rsp
+        0x5b,                                                       // pop    %rbx
+        0xc3,                                                       // retq
+    }
+};
+
+#endif
 
 static uint32_t LOAD_LIBRARY_32 = 0;
 static uint32_t GET_PROC_ADDRESS_32 = 0;
@@ -3413,9 +3048,6 @@ BOOL get_wow64_addresses(void)
     PROCESS_INFORMATION piProcInfo;
     STARTUPINFO  siStartInfo;
     BOOL ret;
-
-    // Detect and avoid inception!
-    CreateProcessA_t createProcess = CreateProcessA_orig == NULL ? CreateProcessA : CreateProcessA_orig;
 
     TCHAR szCmdline[] = TEXT("tup32detect.exe");
 
@@ -3443,7 +3075,7 @@ BOOL get_wow64_addresses(void)
 
     memset(&piProcInfo, 0, sizeof(PROCESS_INFORMATION));
 
-    ret = createProcess(
+    ret = CreateProcessA(
         NULL,
         szCmdline,
         NULL,
@@ -3474,6 +3106,9 @@ BOOL get_wow64_addresses(void)
     return TRUE;
 }
 
+
+#ifdef _WIN64
+
 int tup_inject_dll(
     LPPROCESS_INFORMATION lpProcessInformation,
     const char *depfilename,
@@ -3484,7 +3119,6 @@ int tup_inject_dll(
     DWORD old_protect;
     HANDLE process;
 
-#ifdef _WIN64
     BOOL bWow64 = 0;
     IsWow64Process(lpProcessInformation->hProcess, &bWow64);
 
@@ -3493,7 +3127,7 @@ int tup_inject_dll(
         DEBUG_HOOK("%s is WOW64: %i\n", buffer, bWow64);
     }
 
-    // WOW64
+    // Loading 32bit application from 64bit application
     if (bWow64) {
         remote_thread32_t remote;
 
@@ -3549,8 +3183,9 @@ int tup_inject_dll(
             return -1;
 
         unsigned char code[code_size];
+        memset(code, 0, code_size);
 
-        memcpy(code, &remote_stub32, code_size);
+        memcpy(code, &remote_stub32, sizeof(remote_stub32));
 
         *(DWORD*)(code + 0x1) = ctx.Eip;											// Return addr
         *(DWORD*)(code + 0x8) = (DWORD)((DWORD_PTR)remote_data + code_size);							// Arg (ptr to remote (TCB))
@@ -3573,7 +3208,6 @@ int tup_inject_dll(
         if (!Wow64SetThreadContext(lpProcessInformation->hThread, &ctx))
             return -1;
     } else {
-#endif
         HMODULE kernel32;
         remote_thread_t remote;
 
@@ -3586,28 +3220,18 @@ int tup_inject_dll(
         strcat(remote.execdir, execdir);
         strcat(remote.dll_name, execdir);
         strcat(remote.dll_name, "\\");
-#ifdef _WIN64
         strcat(remote.dll_name, "tup-dllinject.dll");
-#else
-        strcat(remote.dll_name, "tup-dllinject32.dll");
-#endif
         strcat(remote.func_name, "tup_inject_init");
 
         CONTEXT ctx;
         ctx.ContextFlags = CONTEXT_CONTROL;
         if (!GetThreadContext(lpProcessInformation->hThread, &ctx)) {
-            DEBUG_HOOK("XXX: Unable to get thread context\n");
+            DEBUG_HOOK("Unable to get thread context\n");
             return -1;
         }
 
         /* Align code_size to a 16 byte boundary */
-#ifdef _WIN64
-        code_size = ((uintptr_t)&remote_end
-            - (uintptr_t)&remote_stub + 0x0F)
-            & ~0x0F;
-#else
-        code_size = (sizeof(remote_stub32) + 0x0F) & ~0x0F;
-#endif
+        code_size = (sizeof(remote_stub64) + 0x0F) & ~0x0F;
 
         DEBUG_HOOK("Injecting dll '%s' '%s' %s' '%s'\n",
             remote.execdir,
@@ -3635,19 +3259,13 @@ int tup_inject_dll(
             return -1;
 
         unsigned char code[code_size];
+        memset(code, 0, code_size);
 
-#ifdef _WIN64
-        memcpy(code, &remote_stub, code_size);
+        memcpy(code, &remote_stub64, sizeof(remote_stub64));
         *(DWORD*)(code + 0x7) = low32(ctx.Rip);
         *(DWORD*)(code + 0xf) = high32(ctx.Rip);
         *(DWORD64*)(code + 0x30) = (long long unsigned int)(remote_data + code_size);
-        *(DWORD64*)(code + 0x3d) = (long long unsigned int)(DWORD_PTR)remote_data + ((DWORD_PTR)&remote_init - (DWORD_PTR)&remote_stub);
-#else
-        memcpy(code, &remote_stub32, code_size);
-        *(DWORD*)(code + 0x1) = ctx.Eip;											// Return addr
-        *(DWORD*)(code + 0x8) = (DWORD)((DWORD_PTR)remote_data + code_size);							// Arg (ptr to remote (TCB))
-        *(DWORD*)(code + 0xd) = (DWORD)((DWORD_PTR)remote_data + ((DWORD_PTR)&remote_stub32.remote_init - (DWORD_PTR)&remote_stub32));	// Func (ptr to remote_init)
-#endif
+        *(DWORD64*)(code + 0x3d) = (long long unsigned int)(DWORD_PTR)remote_data + ((DWORD_PTR)&remote_stub64.remote_init - (DWORD_PTR)&remote_stub64);
 
         if (!WriteProcessMemory(process, remote_data, code, code_size, NULL))
             return -1;
@@ -3661,18 +3279,111 @@ int tup_inject_dll(
         if (!FlushInstructionCache(process, remote_data, code_size + sizeof(remote)))
             return -1;
 
-#ifdef _WIN64
         ctx.Rip = (DWORD_PTR)remote_data;
-#else
-        ctx.Eip = (DWORD_PTR)remote_data;
-#endif
-
         ctx.ContextFlags = CONTEXT_CONTROL;
         if (!SetThreadContext(lpProcessInformation->hThread, &ctx))
             return -1;
-#ifdef _WIN64
     }
-#endif
 
     return 0;
 }
+
+#else
+
+int tup_inject_dll(
+    LPPROCESS_INFORMATION lpProcessInformation,
+    const char *depfilename,
+    const char *vardict_file)
+{
+    char* remote_data;
+    size_t code_size;
+    DWORD old_protect;
+    HANDLE process;
+    HMODULE kernel32;
+    remote_thread_t remote;
+    BOOL bWow64 = 0;
+
+    // Make sure we do not try to inject into 64bit processes
+    IsWow64Process(lpProcessInformation->hProcess, &bWow64);
+    if (!bWow64) {
+        fprintf(stderr, "tup error: Unable to start 64bit applications from 32bit\n");
+        fflush(stderr);
+        return -1;
+    }
+
+    memset(&remote, 0, sizeof(remote));
+    kernel32 = LoadLibraryA("kernel32.dll");
+    remote.load_library = (LoadLibraryA_t)GetProcAddress(kernel32, "LoadLibraryA");
+    remote.get_proc_address = (GetProcAddress_t)GetProcAddress(kernel32, "GetProcAddress");
+    strcpy(remote.depfilename, depfilename);
+    strcpy(remote.vardict_file, vardict_file);
+    strcat(remote.execdir, execdir);
+    strcat(remote.dll_name, execdir);
+    strcat(remote.dll_name, "\\");
+    strcat(remote.dll_name, "tup-dllinject32.dll");
+    strcat(remote.func_name, "tup_inject_init");
+
+    CONTEXT ctx;
+    ctx.ContextFlags = CONTEXT_CONTROL;
+    if (!GetThreadContext(lpProcessInformation->hThread, &ctx)) {
+        DEBUG_HOOK("Unable to get thread context\n");
+        return -1;
+    }
+
+    /* Align code_size to a 16 byte boundary */
+    code_size = (sizeof(remote_stub32) + 0x0F) & ~0x0F;
+
+    DEBUG_HOOK("Injecting dll '%s' '%s' %s' '%s'\n",
+        remote.execdir,
+        remote.dll_name,
+        remote.func_name,
+        remote.depfilename,
+        remote.vardict_file);
+
+    process = lpProcessInformation->hProcess;
+
+    if (!WaitForInputIdle(process, INFINITE))
+        return -1;
+
+    remote_data = (char*)VirtualAllocEx(
+        process,
+        NULL,
+        code_size + sizeof(remote),
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE);
+
+    if (!remote_data)
+        return -1;
+
+    if (!VirtualProtectEx(process, remote_data, code_size + sizeof(remote), PAGE_READWRITE, &old_protect))
+        return -1;
+
+    unsigned char code[code_size];
+    memset(code, 0, code_size);
+
+    memcpy(code, &remote_stub32, sizeof(remote_stub32));
+    *(DWORD*)(code + 0x1) = ctx.Eip;											// Return addr
+    *(DWORD*)(code + 0x8) = (DWORD)((DWORD_PTR)remote_data + code_size);							// Arg (ptr to remote (TCB))
+    *(DWORD*)(code + 0xd) = (DWORD)((DWORD_PTR)remote_data + ((DWORD_PTR)&remote_stub32.remote_init - (DWORD_PTR)&remote_stub32));	// Func (ptr to remote_init)
+
+    if (!WriteProcessMemory(process, remote_data, code, code_size, NULL))
+        return -1;
+
+    if (!WriteProcessMemory(process, remote_data + code_size, &remote, sizeof(remote), NULL))
+        return -1;
+
+    if (!VirtualProtectEx(process, remote_data, code_size + sizeof(remote), PAGE_EXECUTE_READ, &old_protect))
+        return -1;
+
+    if (!FlushInstructionCache(process, remote_data, code_size + sizeof(remote)))
+        return -1;
+
+    ctx.Eip = (DWORD_PTR)remote_data;
+    ctx.ContextFlags = CONTEXT_CONTROL;
+    if (!SetThreadContext(lpProcessInformation->hThread, &ctx))
+        return -1;
+
+    return 0;
+}
+
+#endif
