@@ -38,6 +38,19 @@ DLLINJECT_API BOOL WINAPI DllMain(HANDLE HDllHandle, DWORD Reason, LPVOID Reserv
 typedef struct remote_thread_t remote_thread_t;
 typedef struct remote_thread32_t remote_thread32_t;
 
+typedef HMODULE(WINAPI *LoadLibraryA_t)(const char*);
+typedef FARPROC(WINAPI *GetProcAddress_t)(HMODULE, const char*);
+
+struct remote_thread_t {
+    LoadLibraryA_t load_library;
+    GetProcAddress_t get_proc_address;
+    char depfilename[MAX_PATH];
+    char vardict_file[MAX_PATH];
+    char execdir[MAX_PATH];
+    char dll_name[MAX_PATH];
+    char func_name[256];
+};
+
 DLLINJECT_API DWORD tup_inject_init(remote_thread_t *r);
 
 DLLINJECT_API void tup_inject_setexecdir(const char *dir);

@@ -2365,21 +2365,6 @@ int _stat32_hook(const char *path, void *buffer)
 /* -------------------------------------------------------------------------- */
 
 
-typedef HMODULE(WINAPI *LoadLibraryA_t)(const char*);
-typedef FARPROC(WINAPI *GetProcAddress_t)(HMODULE, const char*);
-
-
-
-struct remote_thread_t {
-    LoadLibraryA_t load_library;
-    GetProcAddress_t get_proc_address;
-    char depfilename[MAX_PATH];
-    char vardict_file[MAX_PATH];
-    char execdir[MAX_PATH];
-    char dll_name[MAX_PATH];
-    char func_name[256];
-};
-
 struct remote_thread32_t {
     uint32_t load_library;
     uint32_t get_proc_address;
@@ -2793,7 +2778,7 @@ DWORD tup_inject_init(remote_thread_t* r)
         return 1;
     }
 
-    if (r != NULL) {
+    if (r->load_library != NULL) {
         DEBUG_HOOK("Inside tup_dllinject_init '%s' '%s' '%s' '%s' '%s'\n",
             filename,
             r->execdir,
@@ -2806,11 +2791,9 @@ DWORD tup_inject_init(remote_thread_t* r)
 
     DEBUG_HOOK(" - injected into %d: %s\n", GetCurrentProcessId(), GetCommandLineA());
 
-    if (r != NULL) {
+    if (r->load_library != NULL) {
         tup_inject_setexecdir(r->execdir);
 
-        if (open_file(r->depfilename))
-            return 1;
         if (open_vardict_file(r->vardict_file))
             return 1;
 
@@ -2823,10 +2806,13 @@ DWORD tup_inject_init(remote_thread_t* r)
 
         strcpy(s_vardict_file, r->vardict_file);
 
-        strcpy(s_depfilename, r->depfilename);
-
         handle_file(filename, NULL, ACCESS_READ);
     }
+
+    if (open_file(r->depfilename))
+        return 1;
+
+    strcpy(s_depfilename, r->depfilename);
 
     /* Find top-level directory, start at CWD */
     _getcwd(tuptopdir, MAX_PATH);
@@ -2863,7 +2849,7 @@ DWORD tup_inject_init(remote_thread_t* r)
     }
 
     // tup.exe needs to find all variant directories
-    if (r == NULL) {
+    if (r->load_library == NULL) {
         snprintf(pathBuffer, MAX_PATH, "%s\\*", tuptopdir);
         hFind = FindFirstFile(pathBuffer, &ffd);
         if (hFind != INVALID_HANDLE_VALUE) {

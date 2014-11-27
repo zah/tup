@@ -46,6 +46,10 @@ static int server_inited = 0;
 static BOOL WINAPI console_handler(DWORD cevent);
 static sig_atomic_t event_got = -1;
 
+static struct server tupServer;
+static HANDLE hTupDepfile;
+static remote_thread_t tup;
+
 static char tuptmpdir[PATH_MAX];
 static char wintmpdir[PATH_MAX];
 
@@ -62,7 +66,6 @@ int server_post_exit(void)
 int server_init(enum server_mode mode)
 {
     char *slash;
-    char mycwd[PATH_MAX];
     struct flist f = { 0, 0, 0 };
     int cwdlen;
 
@@ -71,18 +74,23 @@ int server_init(enum server_mode mode)
     if (server_inited)
         return 0;
 
-    if (GetModuleFileNameA(NULL, mycwd, PATH_MAX - 1) == 0)
+    tupServer.id = 0;
+    tup.load_library = NULL;
+    tup.get_proc_address = NULL;
+    init_file_info(&tupServer.finfo, "");
+
+    if (GetModuleFileNameA(NULL, tup.execdir, PATH_MAX - 1) == 0)
         return -1;
 
     GetTempPath(sizeof(wintmpdir), wintmpdir);
 
-    mycwd[PATH_MAX - 1] = '\0';
-    slash = strrchr(mycwd, '\\');
+    tup.execdir[PATH_MAX - 1] = '\0';
+    slash = strrchr(tup.execdir, '\\');
     if (slash) {
         *slash = '\0';
     }
 
-    tup_inject_setexecdir(mycwd);
+    tup_inject_setexecdir(tup.execdir);
 
     if (fchdir(tup_top_fd()) < 0) {
         perror("fchdir");
@@ -136,7 +144,13 @@ int server_init(enum server_mode mode)
         return -1;
     }
 
-    tup_inject_init(NULL);
+    // Inject into self
+    if (initialize_depfile(&tupServer, tup.depfilename, &hTupDepfile) < 0) {
+        fprintf(stderr, "tup error: Error starting update server.\n");
+        return -1;
+    }
+
+    tup_inject_init(&tup);
 
     if (SetConsoleCtrlHandler(console_handler, TRUE) == 0) {
         perror("SetConsoleCtrlHandler");
@@ -150,6 +164,122 @@ int server_init(enum server_mode mode)
 
 int server_quit(void)
 {
+    struct tup_entry *variantTent, *normalTent;
+    tupid_t srcTupid = DOT_DT;
+    struct tup_entry *srcTent = tup_entry_get(srcTupid);
+
+    // No need to do in-src builds
+    if (tup_entry_variant_null(srcTent) != NULL) {
+        if (srcTent->variant->enabled)
+            return 0;
+    }
+
+    char event1[PATH_MAX];
+    char event2[PATH_MAX];
+    int fd;
+    FILE *f;
+
+    char *cwd = _getcwd(NULL, 0);
+
+    fd = _open_osfhandle((intptr_t)hTupDepfile, 0);
+    if (fd < 0) {
+        perror("open_osfhandle() in process_depfile");
+        fprintf(stderr, "tup error: Unable to call open_osfhandle when processing the dependency file.\n");
+        return -1;
+    }
+    f = fdopen(fd, "rb");
+    if (!f) {
+        perror("fdopen");
+        fprintf(stderr, "tup error: Unable to open dependency file for post-processing.\n");
+        return -1;
+    }
+
+    tup_db_open();
+    tup_db_begin();
+
+    while (1) {
+        struct access_event event;
+
+        if (fread(&event, sizeof(event), 1, f) != 1) {
+            if (!feof(f)) {
+                perror("fread");
+                fprintf(stderr, "tup error: Unable to read the access_event structure from the dependency file.\n");
+                return -1;
+            }
+            break;
+        }
+
+        if (!event.len)
+            continue;
+
+        if (event.len >= PATH_MAX - 1) {
+            fprintf(stderr, "tup error: Size of %i bytes is longer than the max filesize\n", event.len);
+            return -1;
+        }
+        if (event.len2 >= PATH_MAX - 1) {
+            fprintf(stderr, "tup error: Size of %i bytes is longer than the max filesize\n", event.len2);
+            return -1;
+        }
+
+        if (fread(&event1, event.len + 1, 1, f) != 1) {
+            perror("fread");
+            fprintf(stderr, "tup error: Unable to read the first event from the dependency file.\n");
+            return -1;
+        }
+        if (fread(&event2, event.len2 + 1, 1, f) != 1) {
+            perror("fread");
+            fprintf(stderr, "tup error: Unable to read the second event from the dependency file.\n");
+            return -1;
+        }
+
+        if (event1[event.len] != '\0' || event2[event.len2] != '\0') {
+            fprintf(stderr, "tup error: Missing null terminator in access_event\n");
+            return -1;
+        }
+
+        if (event.at != ACCESS_READ)
+            continue;
+
+        // Look for reading of Tupfiles
+        if (strstr(event1, "Tupfile") != NULL) {
+            char *pathStr = event1 + strlen(cwd) + 1;
+            if (strncmp(pathStr, "Tupfile", 7) == 0)
+                continue;
+
+            // First part should be the variant directory
+            pathStr = strtok(pathStr, "\\");
+            tup_db_select_tent(srcTupid, pathStr, &variantTent);
+            if (variantTent == NULL || !variantTent->variant->enabled)
+                continue;
+
+            normalTent = srcTent;
+
+            // Next we resolve in-source Tupfile and variant directory
+            while ((pathStr = strtok(NULL, "\\")) != NULL) {
+                tup_db_select_tent(normalTent->tnode.tupid, pathStr, &normalTent);
+
+                // Only after directory for variant
+                if (strncmp(pathStr, "Tupfile", 7) != 0) {
+                    tup_db_select_tent(variantTent->tnode.tupid, pathStr, &variantTent);
+                }
+
+                if (normalTent == NULL || variantTent == NULL)
+                    break;
+            }
+            if (normalTent == NULL || variantTent == NULL)
+                continue;
+
+            tup_db_create_link(normalTent->tnode.tupid, variantTent->tnode.tupid, TUP_LINK_NORMAL);
+        }
+    }
+
+    if (fclose(f) < 0) {
+        perror("fclose");
+        return -1;
+    }
+
+    tup_db_commit();
+
     return 0;
 }
 
@@ -229,8 +359,7 @@ struct tup_env *newenv,
 #define SHSTR  "sh -c '"
 // /D disables potentially harmfull addons
 #define CMDSTR "CMD.EXE /D /Q /C "
-int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newenv,
-struct tup_entry *dtent, int full_deps)
+int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newenv, struct tup_entry *dtent, int full_deps)
 {
     int rc = -1;
     DWORD return_code = 1;
@@ -448,8 +577,7 @@ int server_parser_stop(struct parser_server *ps)
     return 0;
 }
 
-int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
-struct tupid_entries *env_root, char **rules)
+int server_run_script(FILE *f, tupid_t tupid, const char *cmdline, struct tupid_entries *env_root, char **rules)
 {
     if (f || tupid || cmdline || env_root || rules) {/* unsupported */ }
 
@@ -473,7 +601,7 @@ struct tupid_entries *env_root, char **rules)
     // If name contains slashes, we assume it is a local 
     // script, and try to add a dependency. Otherwise
     // it is a global script, and TUP can not track it.
-    if (strstr(nameBuf, "/") != NULL) {
+    if (strstr(nameBuf, "/") != NULL && (nameBuf[0] != '/' || strstr(nameBuf, ":") != NULL)) {
 
         name = strtok(nameBuf, "/");
 
@@ -517,7 +645,7 @@ struct tupid_entries *env_root, char **rules)
             if (script_entry != NULL) {
                 targetTupid = script_entry->tnode.tupid;
                 targetTent = tup_entry_get(targetTupid);
-            } 
+            }
 
         } while ((name = strtok(NULL, "/")) != NULL && script_entry != NULL);
 
@@ -705,6 +833,7 @@ static int process_depfile(struct server *s, HANDLE h)
             map->tent = NULL; /* This is used when saving deps */
             LIST_INSERT_HEAD(&s->finfo.mapping_list, map, list);
         }
+
         if (handle_file(event.at, event1, event2, &s->finfo) < 0) {
             fprintf(stderr, "tup error: Failed to call handle_file on event '%s'\n", event1);
             return -1;
