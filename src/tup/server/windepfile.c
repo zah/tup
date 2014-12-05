@@ -46,10 +46,6 @@ static int server_inited = 0;
 static BOOL WINAPI console_handler(DWORD cevent);
 static sig_atomic_t event_got = -1;
 
-static struct server tupServer;
-static HANDLE hTupDepfile;
-static remote_thread_t tup;
-
 static char tuptmpdir[PATH_MAX];
 static char wintmpdir[PATH_MAX];
 
@@ -68,29 +64,25 @@ int server_init(enum server_mode mode)
     char *slash;
     struct flist f = { 0, 0, 0 };
     int cwdlen;
+    char execdir[MAX_PATH];
 
     if (mode) {/* unused */ }
 
     if (server_inited)
         return 0;
 
-    tupServer.id = 0;
-    tup.load_library = NULL;
-    tup.get_proc_address = NULL;
-    init_file_info(&tupServer.finfo, "");
-
-    if (GetModuleFileNameA(NULL, tup.execdir, PATH_MAX - 1) == 0)
+    if (GetModuleFileNameA(NULL, execdir, PATH_MAX - 1) == 0)
         return -1;
 
     GetTempPath(sizeof(wintmpdir), wintmpdir);
 
-    tup.execdir[PATH_MAX - 1] = '\0';
-    slash = strrchr(tup.execdir, '\\');
+    execdir[PATH_MAX - 1] = '\0';
+    slash = strrchr(execdir, '\\');
     if (slash) {
         *slash = '\0';
     }
 
-    tup_inject_setexecdir(tup.execdir);
+    tup_inject_setexecdir(execdir);
 
     if (fchdir(tup_top_fd()) < 0) {
         perror("fchdir");
@@ -145,12 +137,7 @@ int server_init(enum server_mode mode)
     }
 
     // Inject into self
-    if (initialize_depfile(&tupServer, tup.depfilename, &hTupDepfile) < 0) {
-        fprintf(stderr, "tup error: Error starting update server.\n");
-        return -1;
-    }
-
-    tup_inject_init(&tup);
+    tup_inject_init(NULL);
 
     if (SetConsoleCtrlHandler(console_handler, TRUE) == 0) {
         perror("SetConsoleCtrlHandler");
@@ -162,8 +149,35 @@ int server_init(enum server_mode mode)
     return 0;
 }
 
+typedef struct slist slist;
+
+struct slist {
+    char *name;
+    slist *next;
+};
+
+
+static void string_add(slist **list, const char *name)
+{
+    slist *ptr;
+    slist *item = calloc(sizeof(slist), 1);
+    if (name != NULL)
+        item->name = strdup(name);
+
+    if (*list != NULL) {
+        ptr = *list;
+        while (ptr->next != NULL) ptr = ptr->next;
+        ptr->next = item;
+    } else {
+        *list = item;
+    }
+}
+
 int server_quit(void)
 {
+    if (!server_inited)
+        return 0;
+
     struct tup_entry *variantTent, *normalTent;
     tupid_t srcTupid = DOT_DT;
     struct tup_entry *srcTent = tup_entry_get(srcTupid);
@@ -174,111 +188,89 @@ int server_quit(void)
             return 0;
     }
 
-    char event1[PATH_MAX];
-    char event2[PATH_MAX];
-    int fd;
-    FILE *f;
-
+    int cnt = 0;
     char *cwd = _getcwd(NULL, 0);
+    HANDLE hFind;
+    WIN32_FIND_DATA findData;
 
-    fd = _open_osfhandle((intptr_t)hTupDepfile, 0);
-    if (fd < 0) {
-        perror("open_osfhandle() in process_depfile");
-        fprintf(stderr, "tup error: Unable to call open_osfhandle when processing the dependency file.\n");
-        return -1;
-    }
-    f = fdopen(fd, "rb");
-    if (!f) {
-        perror("fdopen");
-        fprintf(stderr, "tup error: Unable to open dependency file for post-processing.\n");
-        return -1;
-    }
+    char searchString[PATH_MAX];
+    char pathName[PATH_MAX];
+    char *pathStr;
+    slist *dirs = NULL;
+    slist *tups = NULL, *cTups = NULL;
+    int linkExists;
+
+    // Start with cwd
+    string_add(&dirs, ".");
+
+    do {
+        // search this directory
+        sprintf(searchString, "%s\\%s\\*.*", cwd, dirs->name);
+
+        hFind = FindFirstFile(searchString, &findData);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                sprintf(pathName, "%s\\%s", dirs->name, findData.cFileName);
+                if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY &&
+                    findData.cFileName[0] != '.') {
+                    string_add(&dirs, pathName);
+                } else if (strncmp(findData.cFileName, "Tupfile", 7) == 0) {
+                    string_add(&tups, pathName);
+                }
+
+            } while (FindNextFile(hFind, &findData));
+        }
+    } while ((dirs = dirs->next) != NULL);
 
     tup_db_open();
     tup_db_begin();
 
-    while (1) {
-        struct access_event event;
+    // Look up variants
+    struct variant_head *variants = get_variant_list();
+    struct variant *var = variants->lh_first;
 
-        if (fread(&event, sizeof(event), 1, f) != 1) {
-            if (!feof(f)) {
-                perror("fread");
-                fprintf(stderr, "tup error: Unable to read the access_event structure from the dependency file.\n");
-                return -1;
-            }
-            break;
-        }
+    while (var != NULL) {
 
-        if (!event.len)
-            continue;
+        if (var->enabled) {
+            cTups = tups;
 
-        if (event.len >= PATH_MAX - 1) {
-            fprintf(stderr, "tup error: Size of %i bytes is longer than the max filesize\n", event.len);
-            return -1;
-        }
-        if (event.len2 >= PATH_MAX - 1) {
-            fprintf(stderr, "tup error: Size of %i bytes is longer than the max filesize\n", event.len2);
-            return -1;
-        }
+            while (cTups != NULL) {
+                // First part should be the variant directory
+                variantTent = tup_entry_get(var->tent->parent->tnode.tupid);
+                normalTent = srcTent;
+                pathStr = strtok(strdup(cTups->name), "\\");
 
-        if (fread(&event1, event.len + 1, 1, f) != 1) {
-            perror("fread");
-            fprintf(stderr, "tup error: Unable to read the first event from the dependency file.\n");
-            return -1;
-        }
-        if (fread(&event2, event.len2 + 1, 1, f) != 1) {
-            perror("fread");
-            fprintf(stderr, "tup error: Unable to read the second event from the dependency file.\n");
-            return -1;
-        }
+                // Next we resolve in-source Tupfile and variant directory
+                while ((pathStr = strtok(NULL, "\\")) != NULL) {
+                    tup_db_select_tent(normalTent->tnode.tupid, pathStr, &normalTent);
 
-        if (event1[event.len] != '\0' || event2[event.len2] != '\0') {
-            fprintf(stderr, "tup error: Missing null terminator in access_event\n");
-            return -1;
-        }
+                    // Only after directory for variant
+                    if (strncmp(pathStr, "Tupfile", 7) != 0) {
+                        tup_db_select_tent(variantTent->tnode.tupid, pathStr, &variantTent);
+                    }
 
-        if (event.at != ACCESS_READ)
-            continue;
-
-        // Look for reading of Tupfiles
-        if (strstr(event1, "Tupfile") != NULL) {
-            char *pathStr = event1 + strlen(cwd) + 1;
-            if (strncmp(pathStr, "Tupfile", 7) == 0)
-                continue;
-
-            // First part should be the variant directory
-            pathStr = strtok(pathStr, "\\");
-            tup_db_select_tent(srcTupid, pathStr, &variantTent);
-            if (variantTent == NULL || !variantTent->variant->enabled)
-                continue;
-
-            normalTent = srcTent;
-
-            // Next we resolve in-source Tupfile and variant directory
-            while ((pathStr = strtok(NULL, "\\")) != NULL) {
-                tup_db_select_tent(normalTent->tnode.tupid, pathStr, &normalTent);
-
-                // Only after directory for variant
-                if (strncmp(pathStr, "Tupfile", 7) != 0) {
-                    tup_db_select_tent(variantTent->tnode.tupid, pathStr, &variantTent);
+                    if (normalTent == NULL || variantTent == NULL) {
+                        break;
+                    }
                 }
 
-                if (normalTent == NULL || variantTent == NULL)
-                    break;
+                if (normalTent != NULL && variantTent != NULL) {
+                    cnt++;
+                    linkExists = 0;
+                    tup_db_link_exists(normalTent->tnode.tupid, variantTent->tnode.tupid, TUP_LINK_NORMAL, &linkExists);
+                    if (!linkExists)
+                        tup_db_create_link(normalTent->tnode.tupid, variantTent->tnode.tupid, TUP_LINK_NORMAL);
+                }
+
+                cTups = cTups->next;
             }
-            if (normalTent == NULL || variantTent == NULL)
-                continue;
-
-            tup_db_create_link(normalTent->tnode.tupid, variantTent->tnode.tupid, TUP_LINK_NORMAL);
         }
-    }
-
-    if (fclose(f) < 0) {
-        perror("fclose");
-        return -1;
+        var = var->list.le_next;
     }
 
     tup_db_commit();
+
+    //fprintf(stderr, "Patched %d dependencies\n", cnt);
 
     return 0;
 }
@@ -432,7 +424,7 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
     char *slash = strchr(cmdline, '\\');
     while (slash != NULL) {
         // Make sure we don't mess up escape characters
-        if (slash[1] != '\0' &&  isalnum(slash[1]) != 0)
+        if (slash[1] != '\0' && (isalnum(slash[1]) != 0 || slash[1] == '.'))
             slash[0] = '/';
         slash = strchr(slash + 1, '\\');
     }
