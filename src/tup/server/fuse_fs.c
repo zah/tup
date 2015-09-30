@@ -164,27 +164,6 @@ static const char *peel(const char *path)
 	return path;
 }
 
-static const char *prefix_strip(const char *peeled, const char *variant_dir)
-{
-	if(strncmp(peeled, get_tup_top(), get_tup_top_len()) == 0) {
-		int variant_len = strlen(variant_dir);
-
-		peeled += get_tup_top_len();
-
-		/* Now we need to match the variant directory. Note these
-		 * always begin with a '/'.
-		 */
-		if(strncmp(peeled, variant_dir, variant_len) != 0)
-			return NULL;
-		peeled += variant_len;
-		if(peeled[0] != '/')
-			return NULL;
-		peeled++;
-		return peeled;
-	}
-	return NULL;
-}
-
 static struct mapping *add_mapping(const char *path)
 {
 	static int filenum = 0;
@@ -324,22 +303,18 @@ static void tup_fuse_handle_file(const char *path, const char *stripped, enum ac
 	}
 }
 
-static const char *get_virtual_var(const char *peeled, const char *variant_dir)
+static const char *get_virtual_var(const char *peeled)
 {
 	const char *stripped;
 
-	if(variant_dir) {
-		stripped = prefix_strip(peeled, variant_dir);
-	} else {
-		if(strncmp(peeled, get_tup_top(), get_tup_top_len()) == 0) {
-			peeled += get_tup_top_len();
-			if(peeled[0] != '/')
-				return NULL;
-			peeled++;
-			stripped = peeled;
-		} else {
+	if(strncmp(peeled, get_tup_top(), get_tup_top_len()) == 0) {
+		peeled += get_tup_top_len();
+		if(peeled[0] != '/')
 			return NULL;
-		}
+		peeled++;
+		stripped = peeled;
+	} else {
+		return NULL;
 	}
 	if(stripped) {
 		const char *var = strstr(stripped, TUP_VAR_VIRTUAL_DIR);
@@ -360,7 +335,6 @@ static int tup_fs_getattr(const char *path, struct stat *stbuf)
 	struct tmpdir *tmpdir;
 	struct file_info *finfo;
 	const char *var;
-	const char *variant_dir = NULL;
 	const char *stripped = NULL;
 	int rc;
 
@@ -395,8 +369,6 @@ static int tup_fs_getattr(const char *path, struct stat *stbuf)
 		map = find_mapping(finfo, path);
 		if(map)
 			peeled = map->tmpname;
-		else
-			variant_dir = finfo->variant_dir;
 		put_finfo(finfo);
 	}
 
@@ -406,7 +378,7 @@ static int tup_fs_getattr(const char *path, struct stat *stbuf)
 	 * track of the variable and return failure because we're not actually
 	 * going to open anything.
 	 */
-	var = get_virtual_var(peeled, variant_dir);
+	var = get_virtual_var(peeled);
 	if(var) {
 		if(var[0] == 0) {
 			stbuf->st_mode = S_IFDIR | 0755;
@@ -432,13 +404,6 @@ static int tup_fs_getattr(const char *path, struct stat *stbuf)
 	}
 
 	res = fstatat(tup_top_fd(), peeled, stbuf, AT_SYMLINK_NOFOLLOW);
-	if (res == -1 && variant_dir) {
-		stripped = prefix_strip(peeled, variant_dir);
-		if(stripped) {
-			res = fstatat(tup_top_fd(), stripped, stbuf, AT_SYMLINK_NOFOLLOW);
-		}
-	}
-
 	if (res == -1) {
 		rc = -errno;
 	} else {
@@ -457,7 +422,6 @@ static int tup_fs_access(const char *path, int mask)
 	struct file_info *finfo;
 	struct tmpdir *tmpdir;
 	const char *var;
-	const char *variant_dir = NULL;
 
 	if(context_check() < 0)
 		return -EPERM;
@@ -472,9 +436,6 @@ static int tup_fs_access(const char *path, int mask)
 		map = find_mapping(finfo, path);
 		if(map)
 			peeled = map->tmpname;
-		else
-			variant_dir = finfo->variant_dir;
-
 
 		LIST_FOREACH(tmpdir, &finfo->tmpdir_list, list) {
 			if(strcmp(tmpdir->dirname, peeled) == 0) {
@@ -500,19 +461,13 @@ static int tup_fs_access(const char *path, int mask)
 	 * var[0] == 0 check means it is just the @tup@ directory itself, and
 	 * not a variable name.
 	 */
-	var = get_virtual_var(peeled, variant_dir);
+	var = get_virtual_var(peeled);
 	if(var && var[0] == 0) {
 		return 0;
 	}
 
 	/* This is preceded by a getattr - no need to handle a read event */
 	res = faccessat(tup_top_fd(), peeled, mask, access_flags);
-	if (res == -1 && variant_dir) {
-		const char *stripped = prefix_strip(peeled, variant_dir);
-		if(stripped) {
-			res = faccessat(tup_top_fd(), stripped, mask, access_flags);
-		}
-	}
 	if (res == -1)
 		return -errno;
 
@@ -525,7 +480,6 @@ static int tup_fs_readlink(const char *path, char *buf, size_t size)
 	const char *peeled;
 	struct file_info *finfo;
 	struct mapping *map;
-	const char *variant_dir = NULL;
 	const char *stripped = NULL;
 
 	if(context_check() < 0)
@@ -535,7 +489,6 @@ static int tup_fs_readlink(const char *path, char *buf, size_t size)
 
 	finfo = get_finfo(path);
 	if(finfo) {
-		variant_dir = finfo->variant_dir;
 		map = find_mapping(finfo, path);
 		if(map)
 			peeled = map->tmpname;
@@ -556,12 +509,6 @@ static int tup_fs_readlink(const char *path, char *buf, size_t size)
 		}
 	} else {
 		res = readlinkat(tup_top_fd(), peeled, buf, size - 1);
-		if(res == -1 && variant_dir) {
-			stripped = prefix_strip(peeled, variant_dir);
-			if(stripped) {
-				res = readlinkat(tup_top_fd(), stripped, buf, size - 1);
-			}
-		}
 		if(res == -1)
 			return -errno;
 	}
@@ -588,7 +535,7 @@ static void add_dir_entries(DIR *dp, void *buf, fuse_fill_dir_t filler,
 }
 
 static int fill_actual_directory(const char *peeled, void *buf,
-				 fuse_fill_dir_t filler, int ignore_dot_tup, const char *variant_dir)
+				 fuse_fill_dir_t filler, int ignore_dot_tup)
 {
 	DIR *dp;
 	int fd;
@@ -602,24 +549,10 @@ static int fill_actual_directory(const char *peeled, void *buf,
 		add_dir_entries(dp, buf, filler, ignore_dot_tup);
 		closedir(dp);
 	}
-
-	if(variant_dir)  {
-		const char *stripped = prefix_strip(peeled, variant_dir);
-		if(stripped) {
-			fd = openat(tup_top_fd(), stripped, O_RDONLY);
-			if(fd >= 0) {
-				dp = fdopendir(fd);
-				if(dp == NULL)
-					return -errno;
-				add_dir_entries(dp, buf, filler, ignore_dot_tup);
-				closedir(dp);
-			}
-		}
-	}
 	return 0;
 }
 
-static int readdir_parser(const char *path, void *buf, fuse_fill_dir_t filler, const char *variant_dir)
+static int readdir_parser(const char *path, void *buf, fuse_fill_dir_t filler)
 {
 	if(strncmp(path, get_tup_top(), get_tup_top_len()) == 0) {
 		if(tup_fuse_server_get_dir_entries(path + get_tup_top_len(),
@@ -627,7 +560,7 @@ static int readdir_parser(const char *path, void *buf, fuse_fill_dir_t filler, c
 			return -EPERM;
 	} else {
 		/* t4052 */
-		return fill_actual_directory(path, buf, filler, 0, variant_dir);
+		return fill_actual_directory(path, buf, filler, 0);
 	}
 	return 0;
 }
@@ -637,8 +570,6 @@ static int tup_fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 {
 	const char *peeled;
 	struct file_info *finfo;
-	const char *variant_dir = NULL;
-	const char *stripped = NULL;
 	int is_tmpdir = 0;
 
 	(void) offset;
@@ -659,7 +590,7 @@ static int tup_fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		 */
 		if(server_mode == SERVER_PARSER_MODE) {
 			int rc;
-			rc = readdir_parser(peeled, buf, filler, finfo->variant_dir);
+			rc = readdir_parser(peeled, buf, filler);
 			if(rc < 0) {
 				finfo->server_fail = 1;
 			}
@@ -749,8 +680,6 @@ static int tup_fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			}
 		}
 
-		variant_dir = finfo->variant_dir;
-
 		put_finfo(finfo);
 	}
 
@@ -759,18 +688,10 @@ static int tup_fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 	tup_fuse_handle_file(path, NULL, ACCESS_READ);
 
-	if(variant_dir) {
-		stripped = prefix_strip(peeled, variant_dir);
-		if(stripped) {
-			if(fill_actual_directory(stripped, buf, filler, finfo != NULL, NULL) < 0)
-				return -1;
-		}
-	}
-
 	/* If finfo is NULL, we're outside of tup, so we don't need to ignore
 	 * any files called '.tup' in that case.
 	 */
-	return fill_actual_directory(peeled, buf, filler, finfo != NULL, NULL);
+	return fill_actual_directory(peeled, buf, filler, finfo != NULL);
 }
 
 static int mknod_internal(const char *path, mode_t mode, int flags, int close_fd)
@@ -1186,7 +1107,6 @@ static int tup_fs_open(const char *path, struct fuse_file_info *fi)
 	const char *openfile;
 	struct mapping *map;
 	struct file_info *finfo;
-	const char *variant_dir = NULL;
 	const char *stripped = NULL;
 
 	if(context_check() < 0)
@@ -1200,21 +1120,11 @@ static int tup_fs_open(const char *path, struct fuse_file_info *fi)
 		map = find_mapping(finfo, path);
 		if(map) {
 			openfile = map->tmpname;
-		} else {
-			/* Only try the base dir if it's not a mapped file */
-			variant_dir = finfo->variant_dir;
 		}
 
 		if((fi->flags & O_RDWR) || (fi->flags & O_WRONLY))
 			at = ACCESS_WRITE;
 		fd = openat(tup_top_fd(), openfile, fi->flags);
-		if(fd < 0 && variant_dir) {
-			stripped = prefix_strip(peeled, variant_dir);
-			if(stripped) {
-				fd = openat(tup_top_fd(), stripped, fi->flags);
-			}
-		}
-
 		if(fd < 0) {
 			res = -errno;
 		} else {

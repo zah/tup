@@ -16,25 +16,24 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-# Test that a node-variable can refer to a non-generated file
-# in a variant build also after touching the Tupfile between two
-# updates.
-
+# Make sure we don't try to go beyond the tup hierarchy when searching for
+# Tuprules.tup
 . ./tup.sh
-check_no_windows variant
+cat > Tuprules.tup << HERE
+: |> false |>
+HERE
+
+mkdir tuptest
+cd tuptest
+re_init
+
+cat > Tupfile << HERE
+include_rules
+HERE
 
 tmkdir build
 
-cat > Tupfile << HERE
-&lib = myLib.a
-: &(lib) |> cp %f %o |> %b.copy
-HERE
-
-tup touch Tupfile build/tup.config myLib.a
+tup touch build/tup.config
 update
-tup touch Tupfile
-update
-
-tup_dep_exist . myLib.a build 'cp myLib.a build/myLib.a.copy'
 
 eotup

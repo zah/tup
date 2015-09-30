@@ -29,13 +29,17 @@ update
 
 cat > Tupfile << HERE
 : |> touch %o |> foo
+ifeq (@(FOO),1)
 : ../build/foo |> cat %f > %o |> output
+endif
 HERE
 tup touch Tupfile
 update
 
 tmkdir build2
-tup touch build2/tup.config
+cat > build2/tup.config << HERE
+CONFIG_FOO=1
+HERE
 update_fail_msg "Unable to use files from another variant.*in this variant"
 
 eotup

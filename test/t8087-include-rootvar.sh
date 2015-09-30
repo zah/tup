@@ -16,25 +16,29 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-# Test that a node-variable can refer to a non-generated file
-# in a variant build also after touching the Tupfile between two
-# updates.
-
+# Try to use a _ROOT variable to include a file
 . ./tup.sh
-check_no_windows variant
 
 tmkdir build
 
-cat > Tupfile << HERE
-&lib = myLib.a
-: &(lib) |> cp %f %o |> %b.copy
+cat > Tuprules.tup << HERE
+GITTUP_ROOT = \$(TUP_CWD)
 HERE
 
-tup touch Tupfile build/tup.config myLib.a
-update
-tup touch Tupfile
-update
+tmkdir sub
+cat > sub/Tupfile << HERE
+include_rules
+include \$(GITTUP_ROOT)/lib/lib.tup
+: |> echo \$(CFLAGS) |>
+HERE
 
-tup_dep_exist . myLib.a build 'cp myLib.a build/myLib.a.copy'
+tmkdir lib
+cat > lib/lib.tup << HERE
+CFLAGS += -I\$(TUP_CWD)
+CFLAGS += -I\$(TUP_VARIANTDIR)
+HERE
+
+touch build/tup.config
+update
 
 eotup

@@ -604,7 +604,7 @@ static void initialize_server_struct(struct server *s, struct tup_entry *tent)
 	s->output_fd = -1;
 	s->error_fd = -1;
 	s->error_mutex = &display_mutex;
-	init_file_info(&s->finfo, tup_entry_variant(tent)->variant_dir);
+	init_file_info(&s->finfo);
 }
 
 static int check_empty_variant(struct tup_entry *tent)
@@ -2596,11 +2596,15 @@ static int update(struct node *n)
 	}
 
 	if(compare_outputs) {
-		if(move_outputs(n) < 0)
-			goto err_close_dfd;
+		if(move_outputs(n) < 0) {
+			close(dfd);
+			goto err_out;
+		}
 	} else {
-		if(unlink_outputs(dfd, n) < 0)
-			goto err_close_dfd;
+		if(unlink_outputs(dfd, n) < 0) {
+			close(dfd);
+			goto err_out;
+		}
 	}
 
 	pthread_mutex_lock(&db_mutex);
@@ -2615,28 +2619,30 @@ static int update(struct node *n)
 	}
 	initialize_server_struct(&s, n->tent);
 	pthread_mutex_unlock(&db_mutex);
-	if(rc < 0)
-		goto err_close_dfd;
+	if(rc < 0) {
+		close(dfd);
+		goto err_out;
+	}
 	if(strncmp(cmd, "!tup_ln ", 8) == 0) {
 		pthread_mutex_lock(&db_mutex);
 		rc = do_ln(&s, n->tent->parent, dfd, cmd + 8);
 		pthread_mutex_unlock(&db_mutex);
 	} else {
-		rc = server_exec(&s, dfd, cmd, &newenv, n->tent->parent, need_namespacing);
+		rc = server_exec(&s, cmd, &newenv, n->tent->parent, need_namespacing);
 		use_server = 1;
+	}
+	if(close(dfd) < 0) {
+		perror("close(dfd)");
+		goto err_out;
 	}
 	if(rc < 0) {
 		pthread_mutex_lock(&display_mutex);
 		fprintf(stderr, " *** Command ID=%lli failed: %s\n", n->tnode.tupid, cmd);
 		pthread_mutex_unlock(&display_mutex);
 		free(expanded_name);
-		goto err_close_dfd;
+		goto err_out;
 	}
 	environ_free(&newenv);
-	if(close(dfd) < 0) {
-		perror("close(dfd)");
-		return -1;
-	}
 
 	pthread_mutex_lock(&db_mutex);
 	pthread_mutex_lock(&display_mutex);
@@ -2653,10 +2659,6 @@ static int update(struct node *n)
 			return -1;
 	return rc;
 
-err_close_dfd:
-	if(close(dfd) < 0) {
-		perror("close(dfd)");
-	}
 err_out:
 	return -1;
 }

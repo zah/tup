@@ -1,7 +1,7 @@
 #! /bin/sh -e
 # tup - A file-based build system
 #
-# Copyright (C) 2013-2015  Mike Shal <marfey@gmail.com>
+# Copyright (C) 2012-2015  Mike Shal <marfey@gmail.com>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -16,25 +16,28 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-# Test that a node-variable can refer to a non-generated file
-# in a variant build also after touching the Tupfile between two
-# updates.
-
+# Similar to t8029, but now we generate rules from an included file.
 . ./tup.sh
-check_no_windows variant
 
-tmkdir build
+tmkdir build-default
 
-cat > Tupfile << HERE
-&lib = myLib.a
-: &(lib) |> cp %f %o |> %b.copy
+cat > Tuprules.tup << HERE
+MY_ROOT = \$(TUP_CWD)
 HERE
 
-tup touch Tupfile build/tup.config myLib.a
-update
-tup touch Tupfile
-update
+tmkdir init
+cat > init/Tupfile << HERE
+include_rules
+include \$(MY_ROOT)/proj/install.tup
+HERE
 
-tup_dep_exist . myLib.a build 'cp myLib.a build/myLib.a.copy'
+tmkdir proj
+tmkdir proj/gen
+cat > proj/install.tup << HERE
+: |> touch %o |> gen
+HERE
+
+touch build-default/tup.config
+update
 
 eotup

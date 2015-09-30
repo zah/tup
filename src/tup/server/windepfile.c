@@ -232,7 +232,7 @@ static int create_process(struct server *s, int dfd, char *cmdline,
 
 #define SHSTR  "sh -c '"
 #define CMDSTR "CMD.EXE /Q /C "
-int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newenv,
+int server_exec(struct server *s, const char *cmd, struct tup_env *newenv,
 		struct tup_entry *dtent, int need_namespacing)
 {
 	int rc = -1;
@@ -249,6 +249,7 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
 	unsigned int x;
 	struct file_entry *fent;
 	struct file_entry *tmp;
+	int dfd;
 
 	int have_shell = strncmp(cmd, "sh ", 3) == 0
 		|| strncmp(cmd, "bash ", 5) == 0
@@ -302,6 +303,13 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
 		strcat(cmdline, "'");
 	}
 
+	dfd = tup_entry_open(variant_tent_to_srctent(dtent));
+	if(dfd < 0) {
+		pthread_mutex_lock(s->error_mutex);
+		fprintf(stderr, "tup error: Unable to open directory for running sub-process.\n");
+		pthread_mutex_unlock(s->error_mutex);
+		goto end;
+	}
 	pthread_mutex_lock(&dir_mutex);
 	if(create_process(s, dfd, cmdline, newenv, &pi) < 0) {
 		pthread_mutex_lock(s->error_mutex);
@@ -315,6 +323,10 @@ int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newe
 		goto end;
 	}
 	pthread_mutex_unlock(&dir_mutex);
+	if(close(dfd) < 0) {
+		perror("close(dfd)");
+		goto end;
+	}
 
 	if(tup_inject_dll(&pi, depfile, vardict_file)) {
 		pthread_mutex_lock(s->error_mutex);

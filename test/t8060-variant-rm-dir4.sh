@@ -62,7 +62,7 @@ update_fail_msg "Expected node 'sub'.*but it is not there"
 
 # Make sure that if we try to re-parse the Tupfile we still get the same error message.
 tup touch foo/Tupfile
-update_fail_msg "Explicitly named file 'gen' not found"
+update_fail_msg "Expected node 'sub'.*but it is not there"
 
 rm foo/Tupfile
 tup rm foo/Tupfile

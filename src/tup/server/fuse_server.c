@@ -459,7 +459,7 @@ static int exec_internal(struct server *s, const char *cmd, struct tup_env *newe
 	em.dirlen = get_tup_top_len() - 1;
 	em.dirlen += snprint_tup_entry(dir + em.dirlen,
 				       sizeof(dir) - em.dirlen - 1,
-				       dtent) + 1;
+				       variant_tent_to_srctent(dtent)) + 1;
 	if(em.joblen >= JOB_MAX || em.dirlen >= PATH_MAX) {
 		server_lock(s);
 		fprintf(stderr, "tup error: Directory for tup entry %lli is too long.\n", dtent->tnode.tupid);
@@ -533,12 +533,10 @@ static int exec_internal(struct server *s, const char *cmd, struct tup_env *newe
 	return 0;
 }
 
-int server_exec(struct server *s, int dfd, const char *cmd, struct tup_env *newenv,
+int server_exec(struct server *s, const char *cmd, struct tup_env *newenv,
 		struct tup_entry *dtent, int need_namespacing)
 {
 	int rc;
-
-	if(dfd) {/* TODO */}
 
 	if(tup_fuse_add_group(s->id, &s->finfo) < 0)
 		return -1;
@@ -574,8 +572,8 @@ int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
 	s.exit_status = 0;
 	s.signalled = 0;
 	s.error_mutex = NULL;
-	tent = tup_entry_get(tupid);
-	init_file_info(&s.finfo, tup_entry_variant(tent)->variant_dir);
+	tent = variant_tent_to_srctent(tup_entry_get(tupid));
+	init_file_info(&s.finfo);
 	if(exec_internal(&s, cmdline, &te, tent, 0, 0) < 0)
 		return -1;
 	environ_free(&te);
