@@ -37,6 +37,6 @@ tup_object_exist . ghost-dir
 cat > sub/Tupfile << HERE
 : ../ghost-dir/bar |> cat %f |>
 HERE
-parse_fail_msg "Expected node 'ghost-dir' to be in directory 'build'"
+parse_fail_msg "Expected node 'ghost-dir' to be in directory '\[build\] .'"
 
 eotup

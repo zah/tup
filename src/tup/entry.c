@@ -218,6 +218,10 @@ static int print_tup_entry_internal(FILE *f, struct tup_entry *tent)
 	/* Skip empty entries, and skip '.' here (tent->parent == NULL) */
 	if(!tent || !tent->parent)
 		return 0;
+	if(tup_entry_variant_null(tent) != tup_entry_variant_null(tent->parent)) {
+		fprintf(f, "[%s] ", tent->name.s);
+		return 0;
+	}
 	if(print_tup_entry_internal(f, tent->parent))
 		fprintf(f, "%s", PATH_SEP_STR);
 	/* Don't print anything for the slash root entry */
@@ -237,8 +241,14 @@ void print_tup_entry(FILE *f, struct tup_entry *tent)
 		const char *sep = tent->type == TUP_NODE_CMD ? ": " : PATH_SEP_STR;
 		fprintf(f, "%s", sep);
 	}
-	name = tent->name.s;
-	name_sz = tent->name.len;
+	if(tent->parent && tup_entry_variant_null(tent) != tup_entry_variant_null(tent->parent)) {
+		fprintf(f, "[%s] ", tent->name.s);
+		name = ".";
+		name_sz = 1;
+	} else {
+		name = tent->name.s;
+		name_sz = tent->name.len;
+	}
 	if(!do_verbose && name[0] == '^') {
 		name++;
 		while(*name && *name != ' ' && *name != '^') name++;
