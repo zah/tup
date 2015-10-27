@@ -572,7 +572,7 @@ int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
 	s.exit_status = 0;
 	s.signalled = 0;
 	s.error_mutex = NULL;
-	tent = variant_tent_to_srctent(tup_entry_get(tupid));
+	tent = tup_entry_get(tupid);
 	init_file_info(&s.finfo);
 	if(exec_internal(&s, cmdline, &te, tent, 0, 0) < 0)
 		return -1;
