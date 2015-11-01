@@ -2355,7 +2355,7 @@ static int expand_group(FILE *f, struct estring *e, struct expand_info *info)
 					if(e && !first)
 						if(estring_append(e, " ", 1) < 0)
 							return -1;
-					if(get_relative_dir(f, e, info->tent->parent->tnode.tupid, ttinput->tupid) < 0)
+					if(get_relative_dir(f, e, variant_tent_to_srctent(info->tent->parent)->tnode.tupid, ttinput->tupid) < 0)
 						return -1;
 					if(f)
 						fprintf(f, "\n");
