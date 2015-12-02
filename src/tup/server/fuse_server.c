@@ -608,12 +608,17 @@ int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
 	return -1;
 }
 
-int server_symlink(struct server *s, const char *target, int dfd, const char *linkpath)
+int server_symlink(struct server *s, const char *target, int dfd, const char *linkpath, const char *relpath)
 {
+	char dest[PATH_MAX];
 	if(s) {/* unused */}
-	if(symlinkat(target, dfd, linkpath) < 0) {
+	if(snprintf(dest, sizeof(dest), "%s/%s", relpath, target) >= (int)sizeof(dest)) {
+		fprintf(stderr, "tup error: dest is sized incorrectly in server_symlink.\n");
+		return -1;
+	}
+	if(symlinkat(dest, dfd, linkpath) < 0) {
 		perror("symlinkat");
-		fprintf(stderr, "tup error: unable to create symlink at '%s' pointing to target '%s'\n", linkpath, target);
+		fprintf(stderr, "tup error: unable to create symlink at '%s' pointing to target '%s'\n", linkpath, dest);
 		return -1;
 	}
 	return 0;

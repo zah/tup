@@ -138,6 +138,7 @@ struct rule {
 	struct path_list_head extra_outputs;
 	struct path_list_head bang_extra_outputs;
 	int empty_input;
+	int tup_variant;
 	int line_number;
 };
 

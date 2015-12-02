@@ -2493,12 +2493,15 @@ static int expand_command(char **res,
 	return 0;
 }
 
-static int do_ln(struct server *s, struct tup_entry *dtent, int dfd, const char *cmd)
+static int do_ln(struct server *s, struct tup_entry *dtent, const char *cmd)
 {
 	char file1[PATH_MAX];
 	char fileout[PATH_MAX];
 	const char *endp;
 	struct mapping *map;
+	struct estring e;
+	struct tup_entry *srctent;
+	int dfd;
 
 	while(isspace(*cmd))
 		cmd++;
@@ -2509,10 +2512,28 @@ static int do_ln(struct server *s, struct tup_entry *dtent, int dfd, const char 
 	file1[endp-cmd] = 0;
 	while(isspace(*endp))
 		endp++;
-	if(server_symlink(s, file1, dfd, endp) < 0)
+	if(estring_init(&e) < 0)
 		return -1;
+	srctent = variant_tent_to_srctent(dtent);
+	if(get_relative_dir(NULL, &e, dtent->tnode.tupid, srctent->tnode.tupid) < 0)
+		return -1;
+	dfd = tup_entry_open(srctent);
+	if(dfd < 0) {
+		pthread_mutex_lock(&display_mutex);
+		fprintf(stderr, "tup error: Unable to open directory for update work.\n");
+		tup_db_print(stderr, srctent->tnode.tupid);
+		pthread_mutex_unlock(&display_mutex);
+		return -1;
+	}
+	if(server_symlink(s, file1, dfd, endp, e.s) < 0)
+		return -1;
+	free(e.s);
+	if(close(dfd) < 0) {
+		perror("close(dfd)");
+		return -1;
+	}
 	fileout[0] = '.';
-	snprint_tup_entry(fileout+1, PATH_MAX-1, dtent);
+	snprint_tup_entry(fileout+1, PATH_MAX-1, srctent);
 	strcat(fileout, "/");
 	strcat(fileout, endp);
 	if(handle_file(ACCESS_WRITE, fileout, NULL, &s->finfo) < 0)
@@ -2606,6 +2627,10 @@ static int update(struct node *n)
 			goto err_out;
 		}
 	}
+	if(close(dfd) < 0) {
+		perror("close(dfd)");
+		goto err_out;
+	}
 
 	pthread_mutex_lock(&db_mutex);
 	rc = tup_db_get_inputs(n->tent->tnode.tupid, &sticky_root, &normal_root, &group_sticky_root);
@@ -2620,20 +2645,15 @@ static int update(struct node *n)
 	initialize_server_struct(&s, n->tent);
 	pthread_mutex_unlock(&db_mutex);
 	if(rc < 0) {
-		close(dfd);
 		goto err_out;
 	}
 	if(strncmp(cmd, "!tup_ln ", 8) == 0) {
 		pthread_mutex_lock(&db_mutex);
-		rc = do_ln(&s, n->tent->parent, dfd, cmd + 8);
+		rc = do_ln(&s, n->tent->parent, cmd + 8);
 		pthread_mutex_unlock(&db_mutex);
 	} else {
 		rc = server_exec(&s, cmd, &newenv, n->tent->parent, need_namespacing);
 		use_server = 1;
-	}
-	if(close(dfd) < 0) {
-		perror("close(dfd)");
-		goto err_out;
 	}
 	if(rc < 0) {
 		pthread_mutex_lock(&display_mutex);

@@ -462,12 +462,14 @@ int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
 	return -1;
 }
 
-int server_symlink(struct server *s, const char *target, int dfd, const char *linkpath)
+int server_symlink(struct server *s, const char *target, int dfd, const char *linkpath, const char *relpath)
 {
 	char depfile[PATH_MAX];
 	char dest[PATH_MAX];
 	wchar_t wtarget[PATH_MAX];
 	wchar_t wdest[PATH_MAX];
+
+	if(relpath) {/* unused */}
 
 	dir_mutex_lock(dfd);
 	if(snprintf(dest, sizeof(dest), "%s/%s", win32_get_dirpath(dfd), linkpath) >= PATH_MAX) {

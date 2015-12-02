@@ -450,8 +450,13 @@ static int open_tupfile(struct tupfile *tf, struct tup_entry *tent,
 static int parse_internal_definitions(struct tupfile *tf)
 {
 	char tup_ln[] = "!tup_ln = |> !tup_ln %f %o |>";
+	char tup_variant[] = "!tup_variant = |> !tup_ln %f %o |> %b";
 	if(parse_bang_definition(tf, tup_ln, 0) < 0) {
 		fprintf(tf->f, "tup error: Unable to parse built-in !tup_ln rule.\n");
+		return -1;
+	}
+	if(parse_bang_definition(tf, tup_variant, 0) < 0) {
+		fprintf(tf->f, "tup error: Unable to parse built-in !tup_variant rule.\n");
 		return -1;
 	}
 	return 0;
@@ -1834,6 +1839,20 @@ int execute_rule(struct tupfile *tf, struct rule *r, struct name_list *output_nl
 	int is_bang = 0;
 	int foreach = 0;
 
+	if(strcmp(r->command, "!tup_variant") == 0) {
+		r->tup_variant = 1;
+	} else {
+		r->tup_variant = 0;
+	}
+
+	/* !tup_variant is a no-op in the root variant. */
+	if(r->tup_variant && tf->variant->root_variant) {
+		delete_name_list(&r->order_only_inputs);
+		delete_name_list(&r->bang_oo_inputs);
+		delete_name_list(&r->inputs);
+		return 0;
+	}
+
 	make_name_list_unique(&r->inputs);
 
 	if(r->command[0] == '!') {
@@ -2815,7 +2834,8 @@ static int validate_output(struct tupfile *tf, tupid_t dt, const char *name,
 
 static int do_rule_outputs(struct tupfile *tf, struct path_list_head *oplist, struct name_list *nl,
 			   struct name_list *use_onl, struct name_list *onl, struct tup_entry **group,
-			   struct estring *variant_prefix, int *command_modified, struct tupid_entries *output_root)
+			   struct estring *variant_prefix, int *command_modified, struct tupid_entries *output_root,
+			   int check_variant_outputs)
 {
 	struct path_list *pl;
 	struct path_list_head tmplist;
@@ -2891,8 +2911,8 @@ static int do_rule_outputs(struct tupfile *tf, struct path_list_head *oplist, st
 			strncpy(onle->path, pl->pel->path, pl->pel->len);
 			onle->path[pl->pel->len] = 0;
 		}
-		if(!tf->variant->root_variant) {
-			char *withvariant;
+
+		if(check_variant_outputs) {
 			struct tup_entry *tent;
 			struct tup_entry *srctent;
 			if(variant_get_srctent(tf->variant, pl->dt, &srctent) < 0)
@@ -2905,6 +2925,10 @@ static int do_rule_outputs(struct tupfile *tf, struct path_list_head *oplist, st
 					return -1;
 				}
 			}
+		}
+
+		if(!tf->variant->root_variant) {
+			char *withvariant;
 			withvariant = malloc(variant_prefix->len + 1 + strlen(onle->path) + 1);
 			if(!withvariant) {
 				perror("malloc");
@@ -3007,7 +3031,7 @@ static int do_rule(struct tupfile *tf, struct rule *r, struct name_list *nl,
 			return -1;
 	}
 
-	if(do_rule_outputs(tf, &r->outputs, nl, NULL, &onl, &group, &variant_prefix, &command_modified, &output_root) < 0)
+	if(do_rule_outputs(tf, &r->outputs, nl, NULL, &onl, &group, &variant_prefix, &command_modified, &output_root, !r->tup_variant) < 0)
 		return -1;
 	if(r->bin) {
 		TAILQ_FOREACH(onle, &onl.entries, list) {
@@ -3015,9 +3039,9 @@ static int do_rule(struct tupfile *tf, struct rule *r, struct name_list *nl,
 				return -1;
 		}
 	}
-	if(do_rule_outputs(tf, &r->extra_outputs, nl, &onl, &extra_onl, &group, &variant_prefix, &command_modified, &output_root) < 0)
+	if(do_rule_outputs(tf, &r->extra_outputs, nl, &onl, &extra_onl, &group, &variant_prefix, &command_modified, &output_root, !r->tup_variant) < 0)
 		return -1;
-	if(do_rule_outputs(tf, &r->bang_extra_outputs, nl, &onl, &extra_onl, &group, &variant_prefix, &command_modified, &output_root) < 0)
+	if(do_rule_outputs(tf, &r->bang_extra_outputs, nl, &onl, &extra_onl, &group, &variant_prefix, &command_modified, &output_root, !r->tup_variant) < 0)
 		return -1;
 	free(variant_prefix.s);
 
