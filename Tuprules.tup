@@ -27,6 +27,7 @@ CFLAGS += -Wwrite-strings
 CFLAGS += -Wswitch-enum
 CFLAGS += -fno-common
 CFLAGS += -I$(TUP_CWD)/src
+CFLAGS += -I$(TUP_VARIANTDIR)/src
 
 ifeq (@(TUP_32_BIT),y)
 CFLAGS += -m32

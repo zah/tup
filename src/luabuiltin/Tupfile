@@ -1,2 +1,2 @@
 include_rules
-: builtin.lua | ../lua/lua |> ../lua/lua xxd.lua %f %o |> luabuiltin.h
+: ../lua/lua builtin.lua |> %1f xxd.lua %2f %o |> luabuiltin.h
