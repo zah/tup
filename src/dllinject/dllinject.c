@@ -255,6 +255,81 @@ typedef BOOL(WINAPI *FindNextFileW_t)(
 	__in  HANDLE hFindFile,
 	__out LPWIN32_FIND_DATAW lpFindFileData);
 
+typedef BOOL (WINAPI *CreateProcessA_t)(
+	__in_opt    LPCSTR lpApplicationName,
+	__inout_opt LPSTR lpCommandLine,
+	__in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	__in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+	__in        BOOL bInheritHandles,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOA lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation);
+
+typedef BOOL (WINAPI * CreateProcessW_t)(
+	__in_opt    LPCWSTR lpApplicationName,
+	__inout_opt LPWSTR lpCommandLine,
+	__in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	__in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+	__in        BOOL bInheritHandles,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCWSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOW lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation);
+
+typedef BOOL (WINAPI *CreateProcessAsUserA_t)(
+	__in_opt    HANDLE hToken,
+	__in_opt    LPCSTR lpApplicationName,
+	__inout_opt LPSTR lpCommandLine,
+	__in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	__in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+	__in        BOOL bInheritHandles,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOA lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation);
+
+typedef BOOL (WINAPI *CreateProcessAsUserW_t)(
+	__in_opt    HANDLE hToken,
+	__in_opt    LPCWSTR lpApplicationName,
+	__inout_opt LPWSTR lpCommandLine,
+	__in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	__in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+	__in        BOOL bInheritHandles,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCWSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOW lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation
+	);
+
+typedef BOOL (WINAPI *CreateProcessWithLogonW_t)(
+	__in        LPCWSTR lpUsername,
+	__in_opt    LPCWSTR lpDomain,
+	__in        LPCWSTR lpPassword,
+	__in        DWORD dwLogonFlags,
+	__in_opt    LPCWSTR lpApplicationName,
+	__inout_opt LPWSTR lpCommandLine,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCWSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOW lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation);
+
+typedef BOOL (WINAPI *CreateProcessWithTokenW_t)(
+	__in        HANDLE hToken,
+	__in        DWORD dwLogonFlags,
+	__in_opt    LPCWSTR lpApplicationName,
+	__inout_opt LPWSTR lpCommandLine,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCWSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOW lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation);
+
 typedef NTSTATUS(WINAPI *NtOpenFile_t)(
 	__out  PHANDLE FileHandle,
 	__in   ACCESS_MASK DesiredAccess,
@@ -399,6 +474,10 @@ static BOOL add_variant(const char *path)
 }
 
 static OpenFile_t			OpenFile_orig;
+static CreateFileA_t                   CreateFileA_orig;
+static CreateFileW_t                   CreateFileW_orig;
+static CreateFileTransactedA_t         CreateFileTransactedA_orig;
+static CreateFileTransactedW_t         CreateFileTransactedW_orig;
 static DeleteFileA_t			DeleteFileA_orig;
 static DeleteFileW_t			DeleteFileW_orig;
 static DeleteFileTransactedA_t		DeleteFileTransactedA_orig;
@@ -427,6 +506,12 @@ static FindFirstFileA_t			FindFirstFileA_orig;
 static FindFirstFileW_t			FindFirstFileW_orig;
 static FindNextFileA_t			FindNextFileA_orig;
 static FindNextFileW_t			FindNextFileW_orig;
+static CreateProcessA_t			CreateProcessA_orig;
+static CreateProcessW_t			CreateProcessW_orig;
+static CreateProcessAsUserA_t		CreateProcessAsUserA_orig;
+static CreateProcessAsUserW_t		CreateProcessAsUserW_orig;
+static CreateProcessWithLogonW_t	CreateProcessWithLogonW_orig;
+static CreateProcessWithTokenW_t	CreateProcessWithTokenW_orig;
 static NtCreateFile_t			NtCreateFile_orig;
 static NtOpenFile_t			NtOpenFile_orig;
 static NtCreateUserProcess_t		NtCreateUserProcess_orig;
@@ -442,9 +527,10 @@ static stat32_t       _stat32_orig;
 #define FILE_OPEN_FOR_BACKUP_INTENT 0x00004000
 
 #define handle_file(a, b, c) mhandle_file(a, b, c, __LINE__)
+#define handle_file_w(a, b, c, d) mhandle_file_w(a, b, c, d, __LINE__)
 static void mhandle_file(const char* file, const char* file2, enum access_type at, int line);
-static void handle_file_w(const wchar_t* file, const wchar_t* file2, enum access_type at);
-static int canon_path(const char *file, char *dest);
+static void mhandle_file_w(const wchar_t* file, int filelen, const wchar_t* file2, enum access_type at, int line);
+static int canon_path(const wchar_t *file, int filelen, char *dest);
 
 static const char *strcasestr(const char *arg1, const char *arg2);
 static const wchar_t *wcscasestr(const wchar_t *arg1, const wchar_t *arg2);
@@ -452,6 +538,7 @@ static const wchar_t *wcscasestr(const wchar_t *arg1, const wchar_t *arg2);
 static char s_depfilename[PATH_MAX];
 static char s_vardict_file[PATH_MAX];
 static HANDLE deph = INVALID_HANDLE_VALUE;
+static HANDLE vardicth = INVALID_HANDLE_VALUE;
 
 static int writef(const char *data, unsigned int len)
 {
@@ -1135,7 +1222,6 @@ NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
 	ULONG_PTR CreateInfo,
 	ULONG_PTR AttributeList)
 {
-	CHAR buffer[1024];
 	DWORD err;
 	NTSTATUS rc = NtCreateUserProcess_orig(ProcessHandle,
 		ThreadHandle, ProcessDesiredAccess,
@@ -1154,10 +1240,14 @@ NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
 
 	err = GetLastError();
 
-	if (GetProcessImageFileNameA(*ProcessHandle, buffer, 1024) == 0) {
+	WCHAR wbuffer[1024];
+	if (GetModuleFileNameEx(*ProcessHandle, 0, wbuffer, 1024)) {
 		DEBUG_HOOK("Not able to get name: %X\n", GetLastError());
 		goto done;
 	}
+
+	char buffer[PATH_MAX];
+	WideCharToMultiByte(CP_UTF8, 0, wbuffer, -1, buffer, PATH_MAX, NULL, NULL);
 
 	char *exec = strrchr(buffer, '\\');
 	if (exec == NULL) {
@@ -1181,55 +1271,6 @@ NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
 
 done:
 	SetLastError(err);
-	return rc;
-}
-
-NTSTATUS WINAPI NtCreateUserProcess_hook(PHANDLE ProcessHandle,
-PHANDLE ThreadHandle,
-ACCESS_MASK ProcessDesiredAccess,
-ACCESS_MASK ThreadDesiredAccess,
-POBJECT_ATTRIBUTES ProcessObjectAttributes,
-POBJECT_ATTRIBUTES ThreadObjectAttributes,
-ULONG ProcessFlags,
-ULONG ThreadFlags,
-PRTL_USER_PROCESS_PARAMETERS ProcessParameters,
-ULONG_PTR CreateInfo,
-ULONG_PTR AttributeList)
-{
-
-	NTSTATUS rc = NtCreateUserProcess_orig(ProcessHandle,
-		ThreadHandle, ProcessDesiredAccess,
-		ThreadDesiredAccess,
-		ProcessObjectAttributes,
-		ThreadObjectAttributes,
-		ProcessFlags, ThreadFlags,
-		ProcessParameters,CreateInfo, AttributeList);
-
-        if (rc != STATUS_SUCCESS) {
-                return rc;
-        }
-
-        TCHAR wbuffer[1024];
-        if (GetModuleFileNameEx(*ProcessHandle,0,wbuffer,1024)){
-		char buffer[PATH_MAX];
-		WideCharToMultiByte(CP_UTF8, 0, wbuffer, -1, buffer, PATH_MAX, NULL, NULL);
-		char *exec = strrchr(buffer, '\\');
-		if (exec == NULL) return rc;
-
-		exec++;
-		if (strncasecmp(exec, "tup32detect.exe", 15) == 0 ||
-			strncasecmp(exec, "mspdbsrv.exe", 12) == 0)
-			return rc;
-
-                DEBUG_HOOK("NtCreateUser: %s\n", buffer);
-
-		PROCESS_INFORMATION processInformation;
-		processInformation.hProcess = *ProcessHandle;
-		processInformation.hThread = *ThreadHandle;
-
-		tup_inject_dll(&processInformation, s_depfilename, s_vardict_file);
-        }
-
 	return rc;
 }
 
@@ -2237,6 +2278,281 @@ BOOL WINAPI FindNextFileW_hook(
 	return 1;
 }
 
+BOOL WINAPI CreateProcessA_hook(
+	__in_opt    LPCSTR lpApplicationName,
+	__inout_opt LPSTR lpCommandLine,
+	__in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	__in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+	__in        BOOL bInheritHandles,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOA lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation)
+{
+	BOOL ret = CreateProcessA_orig(
+		lpApplicationName,
+		lpCommandLine,
+		lpProcessAttributes,
+		lpThreadAttributes,
+		bInheritHandles,
+		dwCreationFlags | CREATE_SUSPENDED,
+		lpEnvironment,
+		lpCurrentDirectory,
+		lpStartupInfo,
+		lpProcessInformation);
+
+	DEBUG_HOOK("CreateProcessA '%s' '%s' in '%s'\n",
+		lpApplicationName,
+		lpCommandLine,
+		lpCurrentDirectory);
+
+	if (!ret) {
+		return 0;
+	}
+
+	/* Ignore mspdbsrv.exe, since it continues to run in the background */
+	if(!lpApplicationName || strcasestr(lpApplicationName, "mspdbsrv.exe") == NULL
+		 || strcasestr(lpApplicationName, "tup32detect.exe") == NULL) {
+		tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
+	}
+
+	if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
+		return 1;
+
+	return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
+}
+
+BOOL WINAPI CreateProcessW_hook(
+	__in_opt    LPCWSTR lpApplicationName,
+	__inout_opt LPWSTR lpCommandLine,
+	__in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	__in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+	__in        BOOL bInheritHandles,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCWSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOW lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation)
+{
+	BOOL ret = CreateProcessW_orig(
+		lpApplicationName,
+		lpCommandLine,
+		lpProcessAttributes,
+		lpThreadAttributes,
+		bInheritHandles,
+		dwCreationFlags | CREATE_SUSPENDED,
+		lpEnvironment,
+		lpCurrentDirectory,
+		lpStartupInfo,
+		lpProcessInformation);
+
+	DEBUG_HOOK("CreateProcessW %x '%S' '%S' in '%S'\n",
+		dwCreationFlags,
+		lpApplicationName,
+		lpCommandLine,
+		lpCurrentDirectory);
+
+	if (!ret) {
+		return 0;
+	}
+
+	/* Ignore mspdbsrv.exe, since it continues to run in the background */
+	if(!lpApplicationName || wcscasestr(lpApplicationName, L"mspdbsrv.exe") == NULL
+		 || wcscasestr(lpApplicationName, L"tup32detect.exe") == NULL) {
+		tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
+	}
+
+	if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
+		return 1;
+
+	return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
+}
+
+BOOL WINAPI CreateProcessAsUserA_hook(
+	__in_opt    HANDLE hToken,
+	__in_opt    LPCSTR lpApplicationName,
+	__inout_opt LPSTR lpCommandLine,
+	__in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	__in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+	__in        BOOL bInheritHandles,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOA lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation)
+{
+	BOOL ret = CreateProcessAsUserA_orig(
+		hToken,
+		lpApplicationName,
+		lpCommandLine,
+		lpProcessAttributes,
+		lpThreadAttributes,
+		bInheritHandles,
+		dwCreationFlags | CREATE_SUSPENDED,
+		lpEnvironment,
+		lpCurrentDirectory,
+		lpStartupInfo,
+		lpProcessInformation);
+
+	DEBUG_HOOK("CreateProcessAsUserA '%s' '%s' in '%s'\n",
+		lpApplicationName,
+		lpCommandLine,
+		lpCurrentDirectory);
+
+	if (!ret) {
+		return 0;
+	}
+
+	/* Ignore mspdbsrv.exe, since it continues to run in the background */
+	if(!lpApplicationName || strcasestr(lpApplicationName, "mspdbsrv.exe") == NULL
+		 || strcasestr(lpApplicationName, "tup32detect.exe") == NULL) {
+		tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
+	}
+
+	if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
+		return 1;
+
+	return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
+}
+
+BOOL WINAPI CreateProcessAsUserW_hook(
+	__in_opt    HANDLE hToken,
+	__in_opt    LPCWSTR lpApplicationName,
+	__inout_opt LPWSTR lpCommandLine,
+	__in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	__in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+	__in        BOOL bInheritHandles,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCWSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOW lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation)
+{
+	BOOL ret = CreateProcessAsUserW_orig(
+		hToken,
+		lpApplicationName,
+		lpCommandLine,
+		lpProcessAttributes,
+		lpThreadAttributes,
+		bInheritHandles,
+		dwCreationFlags | CREATE_SUSPENDED,
+		lpEnvironment,
+		lpCurrentDirectory,
+		lpStartupInfo,
+		lpProcessInformation);
+
+	DEBUG_HOOK("CreateProcessAsUserW '%S' '%S' in '%S'\n",
+		lpApplicationName,
+		lpCommandLine,
+		lpCurrentDirectory);
+
+	if (!ret) {
+		return 0;
+	}
+
+	/* Ignore mspdbsrv.exe, since it continues to run in the background */
+	if(!lpApplicationName || wcscasestr(lpApplicationName, L"mspdbsrv.exe") == NULL
+		 || wcscasestr(lpApplicationName, L"tup32detect.exe") == NULL) {
+		tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
+	}
+
+	if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
+		return 1;
+
+	return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
+}
+
+BOOL WINAPI CreateProcessWithLogonW_hook(
+	__in        LPCWSTR lpUsername,
+	__in_opt    LPCWSTR lpDomain,
+	__in        LPCWSTR lpPassword,
+	__in        DWORD dwLogonFlags,
+	__in_opt    LPCWSTR lpApplicationName,
+	__inout_opt LPWSTR lpCommandLine,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCWSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOW lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation)
+{
+	BOOL ret = CreateProcessWithLogonW_orig(
+		lpUsername,
+		lpDomain,
+		lpPassword,
+		dwLogonFlags,
+		lpApplicationName,
+		lpCommandLine,
+		dwCreationFlags | CREATE_SUSPENDED,
+		lpEnvironment,
+		lpCurrentDirectory,
+		lpStartupInfo,
+		lpProcessInformation);
+
+	DEBUG_HOOK("CreateProcessWithLogonW '%S' '%S' in '%S'\n",
+		lpApplicationName,
+		lpCommandLine,
+		lpCurrentDirectory);
+
+	if (!ret) {
+		return 0;
+	}
+
+	/* Ignore mspdbsrv.exe, since it continues to run in the background */
+	if(!lpApplicationName || wcscasestr(lpApplicationName, L"mspdbsrv.exe") == NULL
+		 || wcscasestr(lpApplicationName, L"tup32detect.exe") == NULL) {
+		tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
+	}
+
+	if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
+		return 1;
+
+	return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
+}
+
+BOOL WINAPI CreateProcessWithTokenW_hook(
+	__in        HANDLE hToken,
+	__in        DWORD dwLogonFlags,
+	__in_opt    LPCWSTR lpApplicationName,
+	__inout_opt LPWSTR lpCommandLine,
+	__in        DWORD dwCreationFlags,
+	__in_opt    LPVOID lpEnvironment,
+	__in_opt    LPCWSTR lpCurrentDirectory,
+	__in        LPSTARTUPINFOW lpStartupInfo,
+	__out       LPPROCESS_INFORMATION lpProcessInformation)
+{
+	BOOL ret = CreateProcessWithTokenW_orig(
+		hToken,
+		dwLogonFlags,
+		lpApplicationName,
+		lpCommandLine,
+		dwCreationFlags | CREATE_SUSPENDED,
+		lpEnvironment,
+		lpCurrentDirectory,
+		lpStartupInfo,
+		lpProcessInformation);
+
+	DEBUG_HOOK("CreateProcessWithTokenW '%S' '%S' in '%S'\n",
+		lpApplicationName,
+		lpCommandLine,
+		lpCurrentDirectory);
+
+	if (!ret) {
+		return 0;
+	}
+
+	/* Ignore mspdbsrv.exe, since it continues to run in the background */
+	if(!lpApplicationName || wcscasestr(lpApplicationName, L"mspdbsrv.exe") == NULL
+		 || wcscasestr(lpApplicationName, L"tup32detect.exe") == NULL) {
+		tup_inject_dll(lpProcessInformation, s_depfilename, s_vardict_file);
+	}
+
+	if ((dwCreationFlags & CREATE_SUSPENDED) != 0)
+		return 1;
+
+	return ResumeThread(lpProcessInformation->hThread) != 0xFFFFFFFF;
+}
+
 int _access_hook(const char *pathname, int mode)
 {
 	int rc;
@@ -2429,6 +2745,10 @@ struct remote_thread32_t {
 static struct patch_entry patch_table[] = {
 #define MODULE_NAME "kernel32.dll"
 	HOOK(OpenFile),
+	HOOK(CreateFileA),
+	HOOK(CreateFileW),
+	HOOK(CreateFileTransactedA),
+	HOOK(CreateFileTransactedW),
 	HOOK(DeleteFileA),
 	HOOK(DeleteFileW),
 	HOOK(DeleteFileTransactedA),
@@ -2457,6 +2777,14 @@ static struct patch_entry patch_table[] = {
 	HOOK(FindFirstFileW),
 	HOOK(FindNextFileA),
 	HOOK(FindNextFileW),
+	HOOK(CreateProcessA),
+	HOOK(CreateProcessW),
+#undef MODULE_NAME
+#define MODULE_NAME "advapi32.dll"
+	HOOK(CreateProcessAsUserA),
+	HOOK(CreateProcessAsUserW),
+	HOOK(CreateProcessWithLogonW),
+	HOOK(CreateProcessWithTokenW),
 #undef MODULE_NAME
 #define MODULE_NAME "ntdll.dll"
 	HOOK(NtCreateFile),
@@ -2590,34 +2918,83 @@ static int ignore_file_w(const wchar_t* file)
 	return 0;
 }
 
-static int canon_path(const char *file, char *dest)
+static int canon_path(const wchar_t *file, int filelen, char *dest)
 {
-	if (!file)
-		return 0;
-	if (is_full_path(file)) {
-		/* Full path */
-		PathCanonicalizeA(dest, tmpfile);
-	} else {
-		/* Relative path */
-		char tmp[PATH_MAX];
-		int cwdlen;
-		int filelen = strlen(tmpfile);
-
-		tmp[0] = 0;
-		if (GetCurrentDirectory(sizeof(tmp), tmp) == 0) {
-			/* TODO: Error handle? */
-			return 0;
-		}
-		cwdlen = strlen(tmp);
-		if (cwdlen + filelen + 2 >= (signed)sizeof(tmp)) {
-			/* TODO: Error handle? */
-			return 0;
-		}
-		tmp[cwdlen] = '\\';
-		memcpy(tmp + cwdlen + 1, tmpfile, filelen + 1);
-		PathCanonicalizeA(dest, tmp);
+	wchar_t widepath[WIDE_PATH_MAX];
+	wchar_t widefullpath[WIDE_PATH_MAX];
+	wchar_t other_prefix[] = L"\\??\\"; /* Can't find where this is documented, but NtCreateFile / NtOpenFile use it. */
+	wchar_t backslash_prefix[] = L"\\\\?\\"; /* \\?\ can be used as a prefix in wide-char paths */
+	int prefix_len = 4;
+	int len;
+	int count;
+	if(!file) {
+		DEBUG_HOOK("canon_path: No file - return 0\n");
+		goto out_empty;
 	}
-	return strlen(dest);
+	if(!file[0]) {
+		DEBUG_HOOK("canon_path: nul file - return 0\n");
+		goto out_empty;
+	}
+	if(filelen > WIDE_PATH_MAX - prefix_len - 1) {
+		DEBUG_HOOK("Error: file too long: %.*ls\n", filelen, file);
+		goto out_empty;
+	}
+
+	wcscpy(widepath, backslash_prefix);
+
+	if(wcsncmp(file, other_prefix, prefix_len) == 0 ||
+	   wcsncmp(file, backslash_prefix, prefix_len) == 0) {
+		wcsncpy(&widepath[prefix_len], file + prefix_len, filelen - prefix_len);
+		widepath[filelen] = 0;
+		DEBUG_HOOK("canon_path1: Already prefixed: '%.*ls' -> '%ls'\n", filelen, file, widepath);
+	} else if(is_full_path(file)) {
+		wcsncpy(&widepath[prefix_len], file, filelen);
+		widepath[filelen + prefix_len] = 0;
+		DEBUG_HOOK("canon_path2: Adding backslash prefix: '%.*ls' -> '%ls'\n", filelen, file, widepath);
+	} else {
+		wchar_t *tmp;
+		int dirlen;
+		tmp = widepath + prefix_len;
+		dirlen = GetCurrentDirectoryW(WIDE_PATH_MAX - prefix_len, tmp);
+		if(dirlen == 0) {
+			/* TODO: Error handle? */
+			goto out_empty;
+		}
+		tmp += dirlen;
+
+		if(prefix_len + dirlen + filelen + 2 > WIDE_PATH_MAX) {
+			DEBUG_HOOK("Error: file plus direcotry too long: '%ls' + '%.*ls'\n", widepath, filelen, file);
+			goto out_empty;
+		}
+
+		tmp[0] = '\\';
+		tmp++;
+
+		wcsncpy(tmp, file, filelen);
+		tmp += filelen;
+		tmp[0] = 0;
+
+		DEBUG_HOOK("canon_path3: Prepend CWD: '%.*ls' -> '%ls'\n", filelen, file, widepath);
+	}
+
+	len = GetFullPathName(widepath, WIDE_PATH_MAX, widefullpath, NULL);
+	if(!len) {
+		goto out_empty;
+	}
+	DEBUG_HOOK("GetFullPathName[%ls] -> %i, '%ls'\n", widepath, len, widefullpath);
+
+	count = WideCharToMultiByte(CP_UTF8, 0, widefullpath+prefix_len, len+1-prefix_len, dest, WIDE_PATH_MAX, NULL, NULL);
+	if(!count) {
+		goto out_empty;
+	}
+	DEBUG_HOOK("WideCharToMultiByte[%ls] -> %i, '%s'\n", widefullpath, count, dest);
+
+	/* Discount the nul-terminator */
+	return count - 1;
+
+out_empty:
+	dest[0] = 0;
+	return 0;
 }
 
 static void mhandle_file(const char* file, const char* file2, enum access_type at, int line)
@@ -2665,78 +3042,12 @@ exit:
 	SetLastError(save_error);
 }
 
-static void handle_file_w(const wchar_t* file, const wchar_t* file2, enum access_type at)
-{
-	DWORD save_error = GetLastError();
-
-	char buf[ACCESS_EVENT_MAX_SIZE];
-	char afile[PATH_MAX];
-	char afile2[PATH_MAX];
-	size_t fsz;
-	size_t f2sz;
-	struct access_event* e = (struct access_event*) buf;
-	char* dest = (char*)(e + 1);
-	int ret;
-	int count;
-	wchar_t backslash_prefix[] = L"\\\\?\\"; /* \\?\ can be used as a prefix in wide-char paths */
-	const int backslash_prefix_len = 4;
-
-	if (ignore_file_w(file) || ignore_file_w(file2) || deph == INVALID_HANDLE_VALUE)
-		goto exit;
-
-	if (file)
-		if (wcsncmp(file, backslash_prefix, backslash_prefix_len) == 0)
-			file += backslash_prefix_len;
-	if (file2)
-		if (wcsncmp(file2, backslash_prefix, backslash_prefix_len) == 0)
-			file2 += backslash_prefix_len;
-
-	fsz = file ? wcslen(file) : 0;
-	f2sz = file2 ? wcslen(file2) : 0;
-
-	e->at = at;
-
-	count = WideCharToMultiByte(CP_UTF8, 0, file, fsz, afile, PATH_MAX, NULL, NULL);
-	afile[count] = 0;
-	count = WideCharToMultiByte(CP_UTF8, 0, file2, f2sz, afile2, PATH_MAX, NULL, NULL);
-	afile2[count] = 0;
-
-	e->len = canon_path(afile, dest);
-	dest += e->len;
-	*(dest++) = '\0';
-
-	e->len2 = canon_path(afile2, dest);
-	dest += e->len2;
-	*(dest++) = '\0';
-
-	DEBUG_HOOK("%s [wide, %i, %i]: '%S', '%S'\n", access_type_name[at], e->len, e->len2, file, file2);
-	ret = writef((char*)e, dest - (char*)e);
-	DEBUG_HOOK("writef [wide] %d\n", ret);
-	if (ret) {}
-
-exit:
-	SetLastError(save_error);
-}
-
 static int open_file(const char *depfilename)
 {
-	deph = CreateFile(depfilename, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_TEMPORARY, NULL);
-	if (deph == INVALID_HANDLE_VALUE) {
+	deph = CreateFileA(depfilename, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_TEMPORARY, NULL);
+	if(deph == INVALID_HANDLE_VALUE) {
 		fprintf(stderr, "tup error: Unable to open dependency file '%s' in dllinject. Windows error code: 0x%08lx\n", depfilename, GetLastError());
 		return -1;
-	}
-	return 0;
-}
-
-static int open_vardict_file(const char *vardict_file)
-{
-	vardicth = CreateFile(vardict_file, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_TEMPORARY, NULL);
-	if (vardicth == INVALID_HANDLE_VALUE) {
-		/* Not an error if the file doesn't exist - we may not have a vardict. */
-		if (GetLastError() != ERROR_FILE_NOT_FOUND) {
-			fprintf(stderr, "tup error: Unable to open vardict file '%s' in dllinject. Windows error code: 0x%08lx\n", vardict_file, GetLastError());
-			return -1;
-		}
 	}
 	return 0;
 }
@@ -3312,221 +3623,6 @@ int tup_inject_dll(
 
 	return 0;
 }
-#endif
-
-
-#if __DBG_W64 == 1
-static void printHex(const void *lpvbits, const unsigned int n)
-{
-    char* data = (char*) lpvbits;
-    unsigned int i = 0;
-    char line[17] = {};
-    printf("%.8X | ", (unsigned char*)data);
-    while ( i < n ) {
-        line[i%16] = *(data+i);
-        if ((line[i%16] < 32) || (line[i%16] > 126)) {
-            line[i%16] = '.';
-        }
-        printf("%.2X", (unsigned char)*(data+i));
-        i++;
-        if (i%4 == 0) {
-            if (i%16 == 0) {
-                if (i < n-1)
-                    printf(" | %s\n%.8X | ", &line, data+i);
-            } else {
-                printf(" ");
-            }
-        }
-    }
-    while (i%16 > 0) {
-        (i%4 == 0)?printf("   "):printf("  ");
-        line[i%16] = ' ';
-        i++;
-    }
-    printf(" | %s\n", &line);
-}
-#endif
-
-inline long long unsigned int low32(long long unsigned int tall)
-{
-        return tall & 0x00000000ffffffff;
-}
-inline long long unsigned int high32(long long unsigned int tall)
-{
-        return tall >> 32;
-}
-
-struct remote_stub_t {
-	uint8_t stub[23];
-	uint8_t fileA_Hook[39];
-	uint8_t fileW_Hook[39];
-	uint8_t remote_init[60];
-}__attribute__((packed));
-
-static struct remote_stub_t remote_stub32 = {
-	.stub = {
-0x68, 0x00, 0x00, 0x00, 0x00,
-0x9c,
-0x60,
-0x68, 0xef, 0xbe, 0xad, 0xde,
-0xb8, 0xef, 0xbe, 0xad, 0xde,
-0xff, 0xd0,
-0x61,
-0x9d,
-0xc3
-},
-	.fileA_Hook = {
-0x55,
-0x89, 0xe5,
-0x83, 0xec, 0x18,
-0x8b, 0x45, 0x0c,
-0x89, 0x44, 0x24, 0x04,
-0x8b, 0x45, 0x08,
-0x89, 0x04, 0x24,
-0xff, 0x15, 0x78, 0x00, 0x00, 0x00,
-0x85, 0xc0,
-0x52,
-0x0f, 0x95, 0xc0,
-0x52,
-0x0f, 0xb6, 0xc0,
-0xc9,
-0xc2, 0x08, 0x00
-},
-
-	.fileW_Hook = {
-0x55,
-0x89, 0xe5,
-0x83, 0xec, 0x18,
-0x8b, 0x45, 0x0c,
-0x89, 0x44, 0x24, 0x04,
-0x8b, 0x45, 0x08,
-0x89, 0x04, 0x24,
-0xff, 0x15, 0x7c, 0x00, 0x00, 0x00,
-0x85, 0xc0,
-0x51,
-0x0f, 0x95, 0xc0,
-0x51,
-0x0f, 0xb6, 0xc0,
-0xc9,
-0xc2, 0x08, 0x00
-},
-
-	.remote_init = {
-0x55,
-0x89, 0xe5,
-0x53,
-0x83, 0xec, 0x14,
-0x8b, 0x5d, 0x08,
-0x8d, 0x83, 0x14, 0x03, 0x00, 0x00,
-0x89, 0x04, 0x24,
-0xff, 0x13,
-0x85, 0xc0,
-0x51,
-0x74, 0x1b,				// JE 0x1b
-0x8d, 0x93, 0x18, 0x04, 0x00, 0x00,
-0x89, 0x54, 0x24, 0x04,
-0x89, 0x04, 0x24,
-0xff, 0x53, 0x04,
-0x85, 0xc0,
-0x52,
-0x52,
-0x74, 0x05,				// JE 0x05
-0x89, 0x1c, 0x24,
-0xff, 0xd0,
-0x8b, 0x5d, 0xfc,
-0xc9,
-0xc2, 0x04, 0x00}
-};
-
-static uint32_t LOAD_LIBRARY_32 = 0;
-static uint32_t GET_PROC_ADDRESS_32 = 0;
-
-#define BUFSIZE 4096
-
-BOOL get_wow64_addresses(void)
-{
-	DWORD dwRead;
-	CHAR chBuf[BUFSIZE];
-	PROCESS_INFORMATION piProcInfo;
-	STARTUPINFOA  siStartInfo;
-	BOOL ret;
-	char cmdline[MAX_PATH];
-
-	HANDLE g_hChildStd_OUT_Rd = NULL;
-	HANDLE g_hChildStd_OUT_Wr = NULL;
-
-	SECURITY_ATTRIBUTES saAttr;
-	saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
-	saAttr.bInheritHandle = TRUE;
-	saAttr.lpSecurityDescriptor = NULL;
-
-	// Pipe stdout
-	if ( ! CreatePipe(&g_hChildStd_OUT_Rd, &g_hChildStd_OUT_Wr, &saAttr, 0) )
-		return FALSE;
-
-	// Ensure the read handle to the pipe for STDOUT is not inherited.
-	if ( ! SetHandleInformation(g_hChildStd_OUT_Rd, HANDLE_FLAG_INHERIT, 0) )
-		return FALSE;
-
-	// create process
-	memset(&siStartInfo, 0, sizeof(STARTUPINFO));
-	siStartInfo.cb = sizeof(STARTUPINFO);
-	siStartInfo.hStdOutput = g_hChildStd_OUT_Wr;
-	siStartInfo.dwFlags |= STARTF_USESTDHANDLES;
-
-	memset(&piProcInfo, 0, sizeof(PROCESS_INFORMATION));
-
-	if(snprintf(cmdline, MAX_PATH, "%s\\%s", execdir, "tup32detect.exe") >= MAX_PATH) {
-		fprintf(stderr, "tup error: cmdline is sized wrong for tup32detect.exe");
-		return FALSE;
-	}
-
-	// Detect and avoid inception!
-	if (CreateProcessA_orig != NULL)
-		ret = CreateProcessA_orig(
-				NULL,
-				cmdline,
-				NULL,
-				NULL,
-				TRUE,
-				0,
-				NULL,
-				NULL,
-				&siStartInfo,
-				&piProcInfo);
-	else
-		ret = CreateProcessA(
-				NULL,
-				cmdline,
-				NULL,
-				NULL,
-				TRUE,
-				0,
-				NULL,
-				NULL,
-				&siStartInfo,
-				&piProcInfo);
-
-	if (!ret) {
-		DEBUG_HOOK("Unable to spawn tup32detect.exe\n");
-		return FALSE;
-	}
-
-	ret = ReadFile( g_hChildStd_OUT_Rd, chBuf, BUFSIZE, &dwRead, NULL);
-	if (!ret || dwRead == 0)
-		return FALSE;
-
-	if (sscanf(chBuf, "%x-%x", &LOAD_LIBRARY_32, &GET_PROC_ADDRESS_32) != 2)
-		return FALSE;
-
-	DEBUG_HOOK("Got addresses: %x, %x\n", LOAD_LIBRARY_32, GET_PROC_ADDRESS_32);
-	CloseHandle(piProcInfo.hProcess);
-	CloseHandle(piProcInfo.hThread);
-
-	return TRUE;
-}
-
-
 
 #else
 
@@ -3573,171 +3669,58 @@ int tup_inject_dll(
 	/* Align code_size to a 16 byte boundary */
 	code_size = (sizeof(remote_stub32) + 0x0F) & ~0x0F;
 
-	IsWow64Process(lpProcessInformation->hProcess, &bWow64);
+	DEBUG_HOOK("Injecting dll '%s' '%s' %s' '%s'\n",
+		remote.execdir,
+		remote.dll_name,
+		remote.func_name,
+		remote.depfilename,
+		remote.vardict_file);
 
-	// WOW64
-	DEBUG_HOOK("%s is WOW64: %i\n", GetCommandLineA(), bWow64);
-	if (bWow64) {
-		remote_thread32_t remote;
+	process = lpProcessInformation->hProcess;
 
-		if (GET_PROC_ADDRESS_32 == 0) {
-			if ( ! get_wow64_addresses() ) {
-				printf("Unable to retrieve WOW64 info\n");
-				return -1;
-			}
-		}
-
-		memset(&remote, 0, sizeof(remote));
-		remote.load_library = LOAD_LIBRARY_32;
-		remote.get_proc_address = GET_PROC_ADDRESS_32;
-		strcpy(remote.depfilename, depfilename);
-		strcpy(remote.vardict_file, vardict_file);
-		strcat(remote.execdir, execdir);
-		strcat(remote.dll_name, execdir);
-		strcat(remote.dll_name, "\\");
-		strcat(remote.dll_name, "tup-dllinject32.dll");
-		strcat(remote.func_name, "tup_inject_init");
-
-		WOW64_CONTEXT ctx;
-		ctx.ContextFlags = WOW64_CONTEXT_CONTROL;
-		if ( !Wow64GetThreadContext( lpProcessInformation->hThread, &ctx ) )
-			return -1;
-
-		/* Align code_size to a 16 byte boundary */
-		code_size = (sizeof(remote_stub32) + 0x0F) & ~0x0F;
-	
-		DEBUG_HOOK("Injecting dll '%s' '%s' %s' '%s'\n",
-			remote.execdir,
-			remote.dll_name,
-			remote.func_name,
-			remote.depfilename,
-			remote.vardict_file);
-
-		process = lpProcessInformation->hProcess;
-
-		if (!WaitForInputIdle(process, INFINITE))
-			return -1;
-
-		remote_data = (char*) VirtualAllocEx(
-			process,
-			NULL,
-			code_size + sizeof(remote),
-			MEM_COMMIT | MEM_RESERVE,
-			PAGE_EXECUTE_READWRITE);
-
-		if (!remote_data)
-			return -1;
-
-		if (!VirtualProtectEx(process, remote_data, code_size + sizeof(remote), PAGE_READWRITE, &old_protect))
-			return -1;
-
-		unsigned char code[code_size];
-
-		memcpy( code, &remote_stub32, code_size );
-
-		*(DWORD*)(code + 0x1) = ctx.Eip;											// Return addr
-		*(DWORD*)(code + 0x8) = (DWORD)((DWORD_PTR)remote_data + code_size);							// Arg (ptr to remote (TCB))
-		*(DWORD*)(code + 0xd) = (DWORD)((DWORD_PTR)remote_data + ((DWORD_PTR)&remote_stub32.remote_init - (DWORD_PTR)&remote_stub32));	// Func (ptr to remote_init)
-
-		if (!WriteProcessMemory(process, remote_data, code, code_size, NULL))
-			return -1;
-
-		if (!WriteProcessMemory(process, remote_data + code_size, &remote, sizeof(remote), NULL))
-			return -1;
-
-		if (!VirtualProtectEx(process, remote_data, code_size + sizeof(remote), PAGE_EXECUTE_READ, &old_protect))
-			return -1;
-
-		if (!FlushInstructionCache(process, remote_data, code_size + sizeof(remote)))
-			return -1;
-
-		ctx.Eip = (DWORD_PTR)remote_data;
-		ctx.ContextFlags = WOW64_CONTEXT_CONTROL;
-		if( !Wow64SetThreadContext( lpProcessInformation->hThread, &ctx ) )
-			return -1;
-	} else {
-#ifdef _WIN64
-		HMODULE kernel32;
-		remote_thread_t remote;
-
-		memset(&remote, 0, sizeof(remote));
-		kernel32 = LoadLibraryA("kernel32.dll");
-		remote.load_library = (LoadLibraryA_t) GetProcAddress(kernel32, "LoadLibraryA");
-		remote.get_proc_address = (GetProcAddress_t) GetProcAddress(kernel32, "GetProcAddress");
-		strcpy(remote.depfilename, depfilename);
-		strcpy(remote.vardict_file, vardict_file);
-		strcat(remote.execdir, execdir);
-		strcat(remote.dll_name, execdir);
-		strcat(remote.dll_name, "\\");
-		strcat(remote.dll_name, "tup-dllinject.dll");
-		strcat(remote.func_name, "tup_inject_init");
-
-		CONTEXT ctx;
-		ctx.ContextFlags = CONTEXT_CONTROL;
-		if( !GetThreadContext( lpProcessInformation->hThread, &ctx ) )
-			return -1;
-
-		/* Align code_size to a 16 byte boundary */
-		code_size = (  (uintptr_t) &remote_end
-			     - (uintptr_t) &remote_stub + 0x0F)
-			  & ~0x0F;
-
-		DEBUG_HOOK("Injecting dll '%s' '%s' %s' '%s'\n",
-			remote.execdir,
-			remote.dll_name,
-			remote.func_name,
-			remote.depfilename,
-			remote.vardict_file);
-
-		process = lpProcessInformation->hProcess;
-
-		if (!WaitForInputIdle(process, INFINITE))
-			return -1;
-
-		remote_data = (char*) VirtualAllocEx(
-			process,
-			NULL,
-			code_size + sizeof(remote),
-			MEM_COMMIT | MEM_RESERVE,
-			PAGE_EXECUTE_READWRITE);
-
-		if (!remote_data)
-			return -1;
-
-		if (!VirtualProtectEx(process, remote_data, code_size + sizeof(remote), PAGE_READWRITE, &old_protect))
-			return -1;
-
-		unsigned char code[code_size];
-
-		memcpy( code, &remote_stub, code_size );
-		*(DWORD*)(code + 0x7) = low32(ctx.Rip);
-		*(DWORD*)(code + 0xf) = high32(ctx.Rip);
-		*(DWORD64*)(code + 0x30) = (long long unsigned int)(remote_data + code_size);
-		*(DWORD64*)(code + 0x3d) = (long long unsigned int)(DWORD_PTR)remote_data + ((DWORD_PTR)&remote_init - (DWORD_PTR)&remote_stub);
-
-		if (!WriteProcessMemory(process, remote_data, code, code_size, NULL))
-			return -1;
-
-		if (!WriteProcessMemory(process, remote_data + code_size, &remote, sizeof(remote), NULL))
-			return -1;
-
-		if (!VirtualProtectEx(process, remote_data, code_size + sizeof(remote), PAGE_EXECUTE_READ, &old_protect))
-			return -1;
-
-		if (!FlushInstructionCache(process, remote_data, code_size + sizeof(remote)))
-			return -1;
-
-		ctx.Rip = (DWORD_PTR)remote_data;
-		ctx.ContextFlags = CONTEXT_CONTROL;
-		if( !SetThreadContext( lpProcessInformation->hThread, &ctx ) )
-			return -1;
-#else
-		DEBUG_HOOK("Error: Shouldn't be hooking here for the 32-bit dll.\n");
+	if (!WaitForInputIdle(process, INFINITE))
 		return -1;
-#endif
-	}
+
+	remote_data = (char*)VirtualAllocEx(
+		process,
+		NULL,
+		code_size + sizeof(remote),
+		MEM_COMMIT | MEM_RESERVE,
+		PAGE_EXECUTE_READWRITE);
+
+	if (!remote_data)
+		return -1;
+
+	if (!VirtualProtectEx(process, remote_data, code_size + sizeof(remote), PAGE_READWRITE, &old_protect))
+		return -1;
+
+	unsigned char code[code_size];
+	memset(code, 0, code_size);
+
+	memcpy(code, &remote_stub32, sizeof(remote_stub32));
+	*(DWORD*)(code + 0x1) = ctx.Eip;											// Return addr
+	*(DWORD*)(code + 0x8) = (DWORD)((DWORD_PTR)remote_data + code_size);							// Arg (ptr to remote (TCB))
+	*(DWORD*)(code + 0xd) = (DWORD)((DWORD_PTR)remote_data + ((DWORD_PTR)&remote_stub32.remote_init - (DWORD_PTR)&remote_stub32));	// Func (ptr to remote_init)
+
+	if (!WriteProcessMemory(process, remote_data, code, code_size, NULL))
+		return -1;
+
+	if (!WriteProcessMemory(process, remote_data + code_size, &remote, sizeof(remote), NULL))
+		return -1;
+
+	if (!VirtualProtectEx(process, remote_data, code_size + sizeof(remote), PAGE_EXECUTE_READ, &old_protect))
+		return -1;
+
+	if (!FlushInstructionCache(process, remote_data, code_size + sizeof(remote)))
+		return -1;
+
+	ctx.Eip = (DWORD_PTR)remote_data;
+	ctx.ContextFlags = CONTEXT_CONTROL;
+	if (!SetThreadContext(lpProcessInformation->hThread, &ctx))
+		return -1;
 
 	return 0;
 }
 
 #endif
+

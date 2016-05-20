@@ -154,17 +154,17 @@ int server_init(enum server_mode mode)
 typedef struct slist slist;
 
 struct slist {
-	char *name;
+	wchar_t *name;
 	slist *next;
 };
 
 
-static void string_add(slist **list, const char *name)
+static void string_add(slist **list, const wchar_t *name)
 {
 	slist *ptr;
 	slist *item = calloc(sizeof(slist), 1);
 	if(name != NULL)
-		item->name = strdup(name);
+		item->name = wcsdup(name);
 
 	if(*list != NULL) {
 		ptr = *list;
@@ -191,32 +191,34 @@ int server_quit(void)
 	}
 
 	int cnt = 0;
-	char *cwd = _getcwd(NULL, 0);
+	wchar_t cwd[PATH_MAX];
+	_wgetcwd(cwd, PATH_MAX);
+
 	HANDLE hfind;
 	WIN32_FIND_DATA find_data;
 
-	char search_string[PATH_MAX];
-	char path_name[PATH_MAX];
-	char *path_str;
+	wchar_t search_string[PATH_MAX];
+	wchar_t path_name[PATH_MAX];
+	char *path_fragment;
 	slist *dirs = NULL;
 	slist *tups = NULL, *tups_copy = NULL;
 	int link_exists;
 
 	// Start with cwd
-	string_add(&dirs, ".");
+	string_add(&dirs, L".");
 
 	do {
 		// search this directory
-		sprintf(search_string, "%s\\%s\\*.*", cwd, dirs->name);
+		swprintf(search_string, PATH_MAX, L"%s\\%s\\*.*", cwd, dirs->name);
 
 		hfind = FindFirstFile(search_string, &find_data);
 		if(hfind != INVALID_HANDLE_VALUE) {
 			do {
-				sprintf(path_name, "%s\\%s", dirs->name, find_data.cFileName);
+				wsprintf(path_name, L"%s\\%s", dirs->name, find_data.cFileName);
 				if(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY &&
 					find_data.cFileName[0] != '.') {
 					string_add(&dirs, path_name);
-				} else if(strncmp(find_data.cFileName, "Tupfile", 7) == 0) {
+				} else if(wcsncmp(find_data.cFileName, L"Tupfile", 7) == 0) {
 					string_add(&tups, path_name);
 				}
 
@@ -237,20 +239,20 @@ int server_quit(void)
 			tups_copy = tups;
 
 			while (tups_copy != NULL) {
+				char utf8_filename[MAX_PATH];
 				// First part should be the variant directory
 				variant_tent = tup_entry_get(var->tent->parent->tnode.tupid);
 				normal_tent = src_tent;
-				path_str = strtok(strdup(tups_copy->name), "\\");
+				WideCharToMultiByte(CP_UTF8, 0, tups_copy->name, -1, utf8_filename, PATH_MAX, NULL, NULL);
 
+				path_fragment = strtok(utf8_filename, "\\");
 				// Next we resolve in-source Tupfile and variant directory
-				while ((path_str = strtok(NULL, "\\")) != NULL) {
-					tup_db_select_tent(normal_tent->tnode.tupid, path_str, &normal_tent);
-
+				while ((path_fragment = strtok(NULL, "\\")) != NULL) {
+					tup_db_select_tent(normal_tent->tnode.tupid, path_fragment, &normal_tent);
 					// Only after directory for variant
-					if(strncmp(path_str, "Tupfile", 7) != 0) {
-						tup_db_select_tent(variant_tent->tnode.tupid, path_str, &variant_tent);
+					if(strncmp(path_fragment, "Tupfile", 7) != 0) {
+						tup_db_select_tent(variant_tent->tnode.tupid, path_fragment, &variant_tent);
 					}
-
 					if(normal_tent == NULL || variant_tent == NULL) {
 						break;
 					}
@@ -605,7 +607,7 @@ int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
 		name[0] = 0;
 	}
 
-	// If name contains slashes, we assume it is a local 
+	// If name contains slashes, we assume it is a local
 	// script, and try to add a dependency. Otherwise
 	// it is a global script, and TUP can not track it.
 	if(strstr(namebuf, "/") != NULL && (namebuf[0] != '/' || strstr(namebuf, ":") != NULL)) {
@@ -701,7 +703,7 @@ int server_run_script(FILE *f, tupid_t tupid, const char *cmdline,
 
 	dfd = tup_entry_open(tent);
 
-	if(server_exec(&s, dfd, final_cmdline, &te, tent, full_deps) != 0) {
+	if(server_exec(&s, dfd, final_cmdline, &te, tent, full_deps, 0) != 0) {
 		fprintf(f, "tup-error: Unable to execute run-script: %s\n", final_cmdline);
 		return -1;
 	}
